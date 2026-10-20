@@ -209,6 +209,26 @@ TEST_CASE("CGAL repair removes duplicated faces", "[MeshBoolean]") {
     REQUIRE_THAT(repaired_solid(its).volume(), WithinRel(1000., 0.001));
 }
 
+TEST_CASE("CGAL repair reports what it fixed", "[MeshBoolean]") {
+    indexed_triangle_set its = cube_at(10.f, Vec3f::Zero());
+    its.indices.push_back(its.indices.front()); // one duplicated face
+    flip(its.indices[5]);                       // and one inverted face
+    TriangleMesh       mesh(its);
+    RepairedMeshErrors errors;
+    REQUIRE(MeshBoolean::cgal::repair(mesh, &errors));
+    CHECK(errors.facets_removed == 1);
+    CHECK(errors.facets_reversed == 1);
+    CHECK(errors.repaired());
+    REQUIRE_THAT(mesh.volume(), WithinRel(1000., 1e-6));
+}
+
+TEST_CASE("CGAL repair reports nothing for a clean solid", "[MeshBoolean]") {
+    TriangleMesh       mesh(cube_at(10.f, Vec3f::Zero()));
+    RepairedMeshErrors errors;
+    REQUIRE(MeshBoolean::cgal::repair(mesh, &errors));
+    CHECK_FALSE(errors.repaired());
+}
+
 TEST_CASE("CGAL repair removes degenerate faces", "[MeshBoolean]") {
     indexed_triangle_set its = cube_at(10.f, Vec3f::Zero());
     its.indices.pop_back();
@@ -322,6 +342,22 @@ TEST_CASE("CGAL repair closes a hole in a part too far from the origin to weld",
     indexed_triangle_set its = cube_at(size, Vec3f(distance, distance, distance));
     its.indices.pop_back();
     REQUIRE_THAT(repaired_solid(its).volume(), WithinRel(std::ldexp(1., 93), 0.001));
+}
+
+TEST_CASE("CGAL repair keeps a closed solid of four faces", "[MeshBoolean]") {
+    // A tetrahedron, the smallest solid: it must neither be taken for debris nor make the repair fail.
+    indexed_triangle_set tetra;
+    tetra.vertices = {{0.f, 0.f, 0.f}, {10.f, 0.f, 0.f}, {0.f, 10.f, 0.f}, {0.f, 0.f, 10.f}};
+    tetra.indices  = {{0, 2, 1}, {0, 1, 3}, {1, 2, 3}, {0, 3, 2}};
+    REQUIRE_THAT(repaired_solid(tetra).volume(), WithinRel(1000. / 6., 1e-6));
+    // Next to a larger solid it stays too.
+    TriangleMesh both = repaired_solid(merged(cube_at(10.f, Vec3f::Zero()), [&] {
+        indexed_triangle_set far = tetra;
+        for (auto &v : far.vertices)
+            v += Vec3f(50.f, 0.f, 0.f);
+        return far;
+    }()));
+    REQUIRE_THAT(both.volume(), WithinRel(1000. + 1000. / 6., 1e-6));
 }
 
 TEST_CASE("CGAL repair reports failure for a surface that encloses no volume", "[MeshBoolean]") {
