@@ -25,6 +25,7 @@ add_subdirectory(imguizmo)
 add_subdirectory(libigl)
 add_subdirectory(libnest2d)
 add_subdirectory(mcut)
+add_subdirectory(meshfix)      # Mesh repair behind "Fix model", C ABI, no dependencies
 add_subdirectory(miniz)
 add_subdirectory(minilzo)
 add_subdirectory(qhull)
