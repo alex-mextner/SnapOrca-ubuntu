@@ -10,7 +10,9 @@
 #include "libslic3r/TriangleSelector.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <map>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -5450,5 +5452,207 @@ TEST_CASE("Full Spectrum default selections normalize the default family argumen
             std::set<int> distinct(sel.begin(), sel.end());
             CHECK(distinct.size() == 4);
         }
+    }
+}
+
+// ===========================================================================
+// Local-Z ("Subdivide Mix Layer") with manual patterns
+// ===========================================================================
+
+namespace {
+
+struct LocalZPlanSummary
+{
+    std::set<unsigned int>         extruders;            // 1-based physical ids painted by split passes
+    std::map<unsigned int, double> height_by_extruder;   // summed flow height of the split passes per extruder
+    size_t                         split_passes = 0;
+    double                         max_layer_fill_error = 0.; // |sum of a layer's split pass heights - layer height|
+
+    double share(unsigned int extruder) const
+    {
+        double total = 0.;
+        for (const auto &[id, height] : height_by_extruder)
+            total += height;
+        const auto it = height_by_extruder.find(extruder);
+        return (total > 0. && it != height_by_extruder.end()) ? it->second / total : 0.;
+    }
+};
+
+// Slices one 10 x 10 x 2 mm cube assigned (not painted) to the first mixed row (virtual id num_filaments + 1) at
+// 0.2 mm layers with Subdivide Mix Layer on for whole objects, and summarizes its Local-Z plan.
+static LocalZPlanSummary local_z_plan_for_cube(const std::string &mixed_definitions,
+                                               bool               direct_multicolor = false,
+                                               int                num_filaments     = 4)
+{
+    MixedAutoGenerateGuard guard(false);
+
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "local-z-manual-pattern.stl";
+    object->add_volume(make_cube(10., 10., 2.));
+    object->add_instance();
+    object->config.set_key_value("extruder", new ConfigOptionInt(num_filaments + 1));
+    object->ensure_on_bed();
+
+    DynamicPrintConfig config = mixed_region_print_config(mixed_definitions);
+    if (num_filaments != 4) {
+        config.set_num_extruders(unsigned(num_filaments));
+        config.set_num_filaments(unsigned(num_filaments));
+        config.option<ConfigOptionFloats>("filament_diameter")->values.assign(size_t(num_filaments), 1.75);
+        config.option<ConfigOptionStrings>("filament_colour")->values.assign(size_t(num_filaments), "#808080");
+        // ToolOrdering reads an n x n flush matrix; the default one is sized for fewer filaments.
+        config.option<ConfigOptionFloats>("flush_volumes_matrix")->values.assign(size_t(num_filaments * num_filaments), 0.);
+        config.option<ConfigOptionFloats>("flush_volumes_vector")->values.assign(size_t(2 * num_filaments), 0.);
+    }
+    config.set_key_value("layer_height", new ConfigOptionFloat(0.2));
+    config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(0.2));
+    config.set_key_value("enable_prime_tower", new ConfigOptionBool(false));
+    config.set_key_value("dithering_local_z_mode", new ConfigOptionBool(true));
+    config.set_key_value("dithering_local_z_whole_objects", new ConfigOptionBool(true));
+    config.set_key_value("dithering_local_z_direct_multicolor", new ConfigOptionBool(direct_multicolor));
+
+    Print print;
+    print.set_status_silent();
+    print.apply(model, config);
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &print_object = *print.objects().front();
+
+    LocalZPlanSummary        summary;
+    std::map<size_t, double> split_height_by_layer;
+    for (const SubLayerPlan &plan : print_object.local_z_sublayer_plan()) {
+        if (!plan.split_interval)
+            continue;
+        ++summary.split_passes;
+        split_height_by_layer[plan.layer_id] += plan.flow_height;
+        for (size_t extruder_idx = 0; extruder_idx < plan.painted_masks_by_extruder.size(); ++extruder_idx)
+            if (!plan.painted_masks_by_extruder[extruder_idx].empty()) {
+                summary.extruders.insert(unsigned(extruder_idx + 1));
+                summary.height_by_extruder[unsigned(extruder_idx + 1)] += plan.flow_height;
+            }
+    }
+    for (const auto &[layer_id, height] : split_height_by_layer)
+        summary.max_layer_fill_error =
+            std::max(summary.max_layer_fill_error, std::abs(height - print_object.get_layer(int(layer_id))->height));
+    return summary;
+}
+
+// One custom row over filaments 1 and 3 with a manual pattern and a height gradient left switched on.
+static std::string pattern_row_with_gradient(const std::string &pattern)
+{
+    const std::vector<std::string> colors = {"#FF0000", "#00FF00", "#0000FF", "#FFFF00"};
+    MixedFilamentManager           mgr;
+    mgr.add_custom_filament(1, 3, 50, colors);
+    MixedFilament &row   = mgr.mixed_filaments().front();
+    row.manual_pattern   = pattern;
+    row.gradient_enabled = true;
+    row.gradient_start   = 0.8f;
+    row.gradient_end     = 0.2f;
+    return mgr.serialize_custom_entries();
+}
+
+} // namespace
+
+TEST_CASE("Local-Z subdivides a two-filament manual pattern by its filament shares", "[MixedFilament][LocalZ]")
+{
+    // component_a = 1, component_b = 3, pattern 3,4,3: only filaments 3 and 4 print, 2 : 1. Local-Z maps a share p
+    // to lower + p * (upper - lower), so 2 : 1 comes out as 0.12 + 0.08 mm per 0.2 mm layer.
+    const LocalZPlanSummary summary = local_z_plan_for_cube("1,3,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u901,cm1,343");
+    CHECK(summary.split_passes > 0);
+    CHECK(summary.extruders == std::set<unsigned int>{3, 4});
+    CHECK(summary.share(3) > 0.55);
+    CHECK(summary.share(3) < 0.75);
+    CHECK(summary.max_layer_fill_error < 1e-6);
+}
+
+TEST_CASE("Local-Z plans a manual pattern by its shares even with a gradient left on the row", "[MixedFilament][LocalZ]")
+{
+    const std::string definitions = pattern_row_with_gradient("343");
+    MixedFilamentManager loaded;
+    loaded.load_custom_entries(definitions, {"#FF0000", "#00FF00", "#0000FF", "#FFFF00"});
+    REQUIRE_FALSE(loaded.mixed_filaments().empty());
+    REQUIRE(loaded.mixed_filaments().front().gradient_enabled);
+    REQUIRE(loaded.mixed_filaments().front().manual_pattern == "343");
+
+    const LocalZPlanSummary summary = local_z_plan_for_cube(definitions);
+    CHECK(summary.extruders == std::set<unsigned int>{3, 4});
+    CHECK(summary.share(3) > 0.55);
+    CHECK(summary.share(3) < 0.75);
+}
+
+TEST_CASE("Local-Z subdivides a manual pattern of three filaments with every one of them", "[MixedFilament][LocalZ]")
+{
+    // Pattern 3,1,3,4,3,1,3: filaments 3 : 1 : 4 = 4 : 2 : 1.
+    const std::string row = "1,3,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u901,cm1,3134313";
+    SECTION("pair cycle")
+    {
+        const LocalZPlanSummary summary = local_z_plan_for_cube(row, false);
+        CHECK(summary.split_passes > 0);
+        CHECK(summary.extruders == std::set<unsigned int>{1, 3, 4});
+        CHECK(summary.share(3) > summary.share(1));
+        CHECK(summary.share(1) > summary.share(4));
+        CHECK(summary.max_layer_fill_error < 1e-6);
+    }
+    SECTION("direct multicolor")
+    {
+        const LocalZPlanSummary summary = local_z_plan_for_cube(row, true);
+        CHECK(summary.split_passes > 0);
+        CHECK(summary.extruders == std::set<unsigned int>{1, 3, 4});
+        CHECK(summary.share(3) > summary.share(1));
+        CHECK(summary.share(1) > summary.share(4));
+        CHECK(summary.max_layer_fill_error < 1e-6);
+    }
+}
+
+TEST_CASE("Local-Z leaves grouped per-perimeter manual patterns unsplit", "[MixedFilament][LocalZ]")
+{
+    const LocalZPlanSummary summary = local_z_plan_for_cube("1,3,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u901,cm1,34,43");
+    CHECK(summary.split_passes == 0);
+}
+
+TEST_CASE("Local-Z still subdivides a mixed row without a pattern", "[MixedFilament][LocalZ]")
+{
+    const LocalZPlanSummary summary = local_z_plan_for_cube("1,3,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u901,cm0");
+    CHECK(summary.split_passes > 0);
+    CHECK(summary.extruders == std::set<unsigned int>{1, 3});
+}
+
+TEST_CASE("Local-Z keeps a manual pattern of five filaments whole unless the direct multicolor solver is on", "[MixedFilament][LocalZ]")
+{
+    // Without the direct solver, rows of three or more filaments go through the pair cycle, which pairs only the
+    // first four; filament 5 would be dropped, so the row stays on nominal layers.
+    const std::string row = "1,2,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u901,cm1,12345";
+    SECTION("pair cycle")
+    {
+        const LocalZPlanSummary summary = local_z_plan_for_cube(row, false, 5);
+        CHECK(summary.split_passes == 0);
+    }
+    SECTION("direct multicolor")
+    {
+        const LocalZPlanSummary summary = local_z_plan_for_cube(row, true, 5);
+        CHECK(summary.split_passes > 0);
+        CHECK(summary.extruders == std::set<unsigned int>{1, 2, 3, 4, 5});
+    }
+}
+
+TEST_CASE("Local-Z keeps a manual pattern whole when the sub-layer cap would drop a filament", "[MixedFilament][LocalZ]")
+{
+    // Three filaments need three pairs in the pair cycle; a cap of z sub-layers keeps z / 2 pairs.
+    SECTION("cap of 2 sub-layers keeps one pair: stays on nominal layers")
+    {
+        const LocalZPlanSummary summary = local_z_plan_for_cube("1,3,1,1,50,0,g,w,m2,z2,xa0,xb0,d0,o0,u901,cm1,3134313", false);
+        CHECK(summary.split_passes == 0);
+    }
+    SECTION("cap of 6 sub-layers keeps all three pairs")
+    {
+        const LocalZPlanSummary summary = local_z_plan_for_cube("1,3,1,1,50,0,g,w,m2,z6,xa0,xb0,d0,o0,u901,cm1,3134313", false);
+        CHECK(summary.split_passes > 0);
+        CHECK(summary.extruders == std::set<unsigned int>{1, 3, 4});
+    }
+    SECTION("the direct multicolor solver spreads all three under the cap")
+    {
+        const LocalZPlanSummary summary = local_z_plan_for_cube("1,3,1,1,50,0,g,w,m2,z2,xa0,xb0,d0,o0,u901,cm1,3134313", true);
+        CHECK(summary.split_passes > 0);
+        CHECK(summary.extruders == std::set<unsigned int>{1, 3, 4});
     }
 }
