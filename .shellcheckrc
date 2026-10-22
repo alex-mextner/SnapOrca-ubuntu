@@ -1,0 +1,4 @@
+# The CI job runs `shellcheck` without -x and from the repo root: follow the "# shellcheck source=" directives,
+# resolved relative to the sourcing script.
+external-sources=true
+source-path=SCRIPTDIR
