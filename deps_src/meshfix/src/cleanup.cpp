@@ -193,6 +193,112 @@ uint64_t remove_duplicate_faces(Mesh &m) {
     return removed;
 }
 
+uint64_t rejoin_pinched_vertices(Mesh &m) {
+    // Copies at one point: the vertex split of a pinch (and the hole fill after it) leaves one copy per fan.
+    std::vector<uint32_t> idx(m.v.size());
+    for (uint32_t i = 0; i < idx.size(); ++i)
+        idx[i] = i;
+    std::sort(idx.begin(), idx.end(), [&](uint32_t a, uint32_t b) {
+        const Vec3 &p = m.v[a], &q = m.v[b];
+        if (p.x != q.x) return p.x < q.x;
+        if (p.y != q.y) return p.y < q.y;
+        if (p.z != q.z) return p.z < q.z;
+        return a < b;
+    });
+    std::vector<uint32_t> group(m.v.size(), kNone); // the first copy of the point, for vertices with copies
+    std::vector<std::vector<uint32_t>> groups;
+    for (size_t i = 0; i < idx.size();) {
+        size_t j = i + 1;
+        const Vec3 &p = m.v[idx[i]];
+        while (j < idx.size() && m.v[idx[j]].x == p.x && m.v[idx[j]].y == p.y && m.v[idx[j]].z == p.z)
+            ++j;
+        if (j - i > 1) {
+            groups.emplace_back(idx.begin() + i, idx.begin() + j);
+            for (size_t k = i; k < j; ++k)
+                group[idx[k]] = uint32_t(groups.size() - 1);
+        }
+        i = j;
+    }
+    if (groups.empty())
+        return 0;
+    std::vector<std::vector<uint32_t>> faces_of(groups.size());
+    for (uint32_t f = 0; f < m.f.size(); ++f)
+        for (uint32_t x : m.f[f])
+            if (group[x] != kNone && (faces_of[group[x]].empty() || faces_of[group[x]].back() != f))
+                faces_of[group[x]].push_back(f);
+
+    std::vector<uint32_t> repr(m.v.size());
+    for (uint32_t i = 0; i < repr.size(); ++i)
+        repr[i] = i;
+    // (merging happens at the end, once every group has been judged)
+    uint64_t merged = 0;
+    for (size_t g = 0; g < groups.size(); ++g) {
+        const uint32_t target = groups[g].front();
+        const auto     mapped = [&](uint32_t x) { return group[x] == uint32_t(g) ? target : x; };
+        // After the merge the faces around the point must form one closed fan: every neighbour `x` has exactly one face
+        // leaving the point towards it and one arriving from it, and the neighbours are connected through the faces.
+        // Faces that collapse (two corners in the group) are dropped; the faces beside them then share their edge.
+        std::unordered_map<uint32_t, std::array<uint32_t, 2>> degree; // x -> {faces target->x, faces x->target}
+        std::unordered_map<uint32_t, uint32_t> next;                  // x -> the neighbour the same face leads to
+        bool manifold = true;
+        for (uint32_t f : faces_of[g]) {
+            Tri t = m.f[f];
+            for (uint32_t &x : t)
+                x = mapped(x);
+            if (t[0] == t[1] || t[1] == t[2] || t[2] == t[0])
+                continue;
+            for (int c = 0; c < 3 && manifold; ++c) {
+                if (t[c] != target)
+                    continue;
+                const uint32_t after = t[(c + 1) % 3], before = t[(c + 2) % 3];
+                ++degree[after][0];  // the face leaves the point towards `after` ...
+                ++degree[before][1]; // ... and arrives from `before`
+                if (!next.emplace(after, before).second)
+                    manifold = false;
+            }
+        }
+        if (manifold && next.empty())
+            manifold = false;
+        for (const auto &d : degree)
+            if (d.second[0] != 1 || d.second[1] != 1)
+                manifold = false;
+        if (manifold) {
+            // One cycle: following `next` from any neighbour returns to it after visiting every neighbour.
+            const uint32_t start = next.begin()->first;
+            size_t         count = 0;
+            uint32_t       cur   = start;
+            do {
+                const auto it = next.find(cur);
+                if (it == next.end()) {
+                    manifold = false;
+                    break;
+                }
+                cur = it->second;
+                ++count;
+            } while (cur != start && count <= next.size());
+            manifold = manifold && cur == start && count == next.size();
+        }
+        if (!manifold)
+            continue;
+        for (uint32_t x : groups[g])
+            repr[x] = target;
+        merged += groups[g].size() - 1;
+    }
+    if (merged == 0)
+        return 0;
+    size_t out = 0;
+    for (size_t f = 0; f < m.f.size(); ++f) {
+        Tri t = m.f[f];
+        for (uint32_t &x : t)
+            x = repr[x];
+        if (t[0] == t[1] || t[1] == t[2] || t[2] == t[0])
+            continue;
+        m.f[out++] = t;
+    }
+    m.f.resize(out);
+    return merged;
+}
+
 uint64_t separate_coincident_vertices(Mesh &m, double distance) {
     if (distance <= 0)
         return 0;
@@ -225,14 +331,42 @@ uint64_t separate_coincident_vertices(Mesh &m, double distance) {
             ++j;
         if (j - i > 1) {
             size_t keep = i;
-            for (size_t k = i + 1; k < j; ++k)
+            Vec3 axis{0, 0, 0};
+            double normals_len = 0;
+            for (size_t k = i; k < j; ++k) {
+                axis = axis + normal[idx[k]];
+                normals_len += norm(normal[idx[k]]);
                 if (face_count[idx[k]] > face_count[idx[keep]])
                     keep = k;
+            }
+            // Copies of one surface (the point is pinched, the normals agree) move along one axis, the sum of their
+            // normals, by growing steps: their faces fan out in separate sectors around that axis, so they cannot cross
+            // however many copies meet in the point, while copies moved along their own tilted normals cut through each
+            // other. Parts that touch from opposite sides (the normals cancel) move along their own normals, away from
+            // each other.
+            const double axis_len = norm(axis);
+            const bool   one_axis = axis_len > 0 && axis_len >= 0.5 * normals_len;
+            // The copies of a point where only faces of the pinch itself meet are filled by triangles between them: on
+            // one line such a triangle has no area, so each step also turns by the golden angle around the axis.
+            Vec3 unit_axis{0, 0, 0}, side_u{0, 0, 0}, side_v{0, 0, 0};
+            if (one_axis) {
+                unit_axis = axis * (1.0 / axis_len);
+                const Vec3 helper = std::fabs(unit_axis.x) < 0.9 ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+                side_u            = cross(unit_axis, helper);
+                side_u            = side_u * (1.0 / norm(side_u));
+                side_v            = cross(unit_axis, side_u);
+            }
+            size_t step = 0;
             for (size_t k = i; k < j; ++k) {
                 if (k == keep)
                     continue;
+                ++step;
                 const double len = norm(normal[idx[k]]);
-                if (len > 0)
+                if (one_axis) {
+                    const double angle = 2.399963229728653 * double(step);
+                    const double reach = distance * double(step);
+                    moves.emplace_back(idx[k], m.v[idx[k]] - unit_axis * reach + (side_u * std::cos(angle) + side_v * std::sin(angle)) * (0.02 * reach));
+                } else if (len > 0)
                     moves.emplace_back(idx[k], m.v[idx[k]] - normal[idx[k]] * (distance / len));
             }
         }

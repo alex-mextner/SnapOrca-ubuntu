@@ -134,6 +134,10 @@ Mesh repair_mesh(const Mesh &input, const meshfix_options &opt, meshfix_report &
             rep.holes_skipped = h.skipped;
             rep.hole_faces_added = h.faces_added;
         }
+        if (ctx.on(MESHFIX_FIX_HOLES)) {
+            ctx.progress("rejoin", 0.70);
+            rejoin_pinched_vertices(m);
+        }
         if (ctx.on(MESHFIX_FIX_COMPONENTS | MESHFIX_FIX_ORIENTATION)) {
             ctx.progress("components", 0.75);
             process_components(m, ctx);

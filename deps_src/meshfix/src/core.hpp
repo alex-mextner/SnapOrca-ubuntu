@@ -112,6 +112,11 @@ HoleStats fill_holes(Mesh &m, uint32_t max_hole_edges, const Ctx &ctx);
 // into cavities. Drops small / flat shells as requested. Updates the report counters.
 void process_components(Mesh &m, const Ctx &ctx);
 
+// Merges the copies of coincident vertices back into one vertex wherever the faces around the point then form a
+// single closed fan (the copies were a pinch that hole filling has closed); collapsed faces are dropped. Returns the
+// number of copies merged away.
+uint64_t rejoin_pinched_vertices(Mesh &m);
+
 // Moves the copies of coincident vertices apart (all but the copy with the most faces), `distance` inward along
 // the normal of their faces. Returns the number of vertices moved.
 uint64_t separate_coincident_vertices(Mesh &m, double distance);
