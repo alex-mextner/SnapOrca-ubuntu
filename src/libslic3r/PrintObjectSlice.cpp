@@ -1858,15 +1858,98 @@ static std::vector<unsigned int> pointillism_sequence_for_row(const MixedFilamen
     return {};
 }
 
-static bool local_z_eligible_mixed_row(const MixedFilament &mf)
+// Physical filaments of a single-group manual pattern in order of first use, with their token counts, when
+// Local-Z can plan it without losing a filament. Comma groups are per-perimeter patterns (resolved by inset),
+// so they have no single per-layer share. Without the direct multicolor solver, rows of three or more
+// filaments go through the pair cycle (build_local_z_pair_cycle_for_row), which pairs only the first four
+// filaments (3 pairs for three, 2 for four) and keeps at most local_z_max_sublayers / 2 pairs; a pattern it
+// cannot cover whole stays on nominal layers.
+static bool local_z_manual_pattern_components(const MixedFilament     &mf,
+                                              size_t                   num_physical,
+                                              bool                     direct_multicolor_solver,
+                                              std::vector<unsigned int> &ids,
+                                              std::vector<int>          &counts)
 {
-    // Local-Z flow-height modulation should apply to all mixed rows that are
-    // resolved as A/B blends on model surfaces, not only custom rows.
-    // Exclude explicit manual patterns and same-layer pointillism rows, which
-    // have their own distribution semantics.
-    return mf.enabled &&
-           mf.manual_pattern.empty() &&
-           mf.distribution_mode != int(MixedFilament::SameLayerPointillisme);
+    ids.clear();
+    counts.clear();
+    if (mf.manual_pattern.find(',') != std::string::npos)
+        return false;
+    for (const unsigned int extruder_id : decode_manual_pattern_sequence(mf, num_physical)) {
+        const auto it = std::find(ids.begin(), ids.end(), extruder_id);
+        if (it == ids.end()) {
+            ids.emplace_back(extruder_id);
+            counts.emplace_back(1);
+        } else {
+            ++counts[size_t(it - ids.begin())];
+        }
+    }
+    if (ids.size() < 2)
+        return false;
+    if (direct_multicolor_solver || ids.size() == 2)
+        return true;
+    const size_t pairs = ids.size() == 3 ? 3 : 2;
+    return ids.size() <= 4 && (mf.local_z_max_sublayers < 2 || size_t(mf.local_z_max_sublayers) / 2 >= pairs);
+}
+
+static bool local_z_eligible_mixed_row(const MixedFilament &mf, size_t num_physical, bool direct_multicolor_solver)
+{
+    // Local-Z flow-height modulation applies to every mixed row resolved as a per-layer blend on
+    // model surfaces. Same-layer pointillism rows have their own XY distribution. A manual pattern
+    // qualifies when Local-Z can plan it by the share of each filament (local_z_planning_rows).
+    if (!mf.enabled || mf.distribution_mode == int(MixedFilament::SameLayerPointillisme))
+        return false;
+    if (mf.manual_pattern.empty())
+        return true;
+    std::vector<unsigned int> ids;
+    std::vector<int>          counts;
+    return local_z_manual_pattern_components(mf, num_physical, direct_multicolor_solver, ids, counts);
+}
+
+// The rows as the Local-Z planner sees them, plus which of them it subdivides. Sub-layers split one
+// nominal layer between the components by share, so a manual pattern enters as the share of each
+// filament in it: two filaments become an A/B row with the pattern's B share, three or more a
+// weighted multi-component row (direct multicolor solver, or the pair cycle when that is off). The
+// token order is not kept: a nominal layer holds at most base / lower-bound sub-layers (0.2 / 0.04 = 5),
+// fewer than most patterns have tokens, and the solvers already spread the shares across layers.
+// Without Subdivide Mix Layer the planner only runs for gradient rows; pattern rows then stay out.
+static std::vector<MixedFilament> local_z_planning_rows(const std::vector<MixedFilament> &rows,
+                                                        size_t                            num_physical,
+                                                        bool                              local_z_mode,
+                                                        bool                              direct_multicolor_solver,
+                                                        std::vector<uint8_t>             &eligible)
+{
+    std::vector<MixedFilament> planning_rows = rows;
+    eligible.assign(rows.size(), uint8_t(0));
+    std::vector<unsigned int> ids;
+    std::vector<int>          counts;
+    for (size_t row_idx = 0; row_idx < planning_rows.size(); ++row_idx) {
+        MixedFilament &mf = planning_rows[row_idx];
+        if (!mf.enabled || mf.distribution_mode == int(MixedFilament::SameLayerPointillisme))
+            continue;
+        if (!mf.manual_pattern.empty()) {
+            if (!local_z_mode || !local_z_manual_pattern_components(mf, num_physical, direct_multicolor_solver, ids, counts))
+                continue;
+            mf.manual_pattern.clear();
+            // The pattern wins over a gradient left on the row, as in MixedFilamentManager::resolve.
+            mf.gradient_enabled = false;
+            mf.component_a = ids[0];
+            mf.component_b = ids[1];
+            if (ids.size() == 2) {
+                mf.gradient_component_ids.clear();
+                mf.gradient_component_weights.clear();
+                mf.mix_b_percent = std::clamp(int(std::lround(100.0 * double(counts[1]) / double(counts[0] + counts[1]))), 1, 99);
+            } else {
+                std::string weights;
+                for (size_t idx = 0; idx < counts.size(); ++idx)
+                    weights += (idx == 0 ? "" : "/") + std::to_string(counts[idx]);
+                mf.gradient_component_ids     = MixedFilamentManager::encode_gradient_component_ids(ids);
+                mf.gradient_component_weights = std::move(weights);
+                mf.distribution_mode          = int(MixedFilament::LayerCycle);
+            }
+        }
+        eligible[row_idx] = uint8_t(1);
+    }
+    return planning_rows;
 }
 
 static bool local_z_direct_multicolor_row(const MixedFilament        &mf,
@@ -1874,9 +1957,6 @@ static bool local_z_direct_multicolor_row(const MixedFilament        &mf,
                                           std::vector<unsigned int>  *component_ids = nullptr,
                                           std::vector<int>           *component_weights = nullptr)
 {
-    if (!local_z_eligible_mixed_row(mf))
-        return false;
-
     const std::vector<unsigned int> ids = decode_gradient_component_ids(mf, num_physical);
     if (ids.size() < 3)
         return false;
@@ -3060,14 +3140,19 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
         return;
     }
 
-    const auto                 &mixed_rows = mixed_mgr.mixed_filaments();
+    // Same condition as the planner's direct multicolor rows below.
+    const bool direct_multicolor_solver = local_z_direct_multicolor && preferred_a <= EPSILON && preferred_b <= EPSILON;
+    std::vector<uint8_t>                   row_local_z_eligible;
+    const std::vector<MixedFilament>       mixed_rows = local_z_planning_rows(
+        mixed_mgr.mixed_filaments(), num_physical, local_z_mode, direct_multicolor_solver, row_local_z_eligible);
     std::vector<std::vector<unsigned int>> row_direct_component_ids(mixed_rows.size());
     std::vector<std::vector<int>>          row_direct_component_weights(mixed_rows.size());
     std::vector<std::vector<double>>       row_direct_component_error_mm(mixed_rows.size());
     std::vector<uint8_t>                   row_uses_direct_multicolor_solver(mixed_rows.size(), uint8_t(0));
-    if (local_z_direct_multicolor && preferred_a <= EPSILON && preferred_b <= EPSILON) {
+    if (direct_multicolor_solver) {
         for (size_t row_idx = 0; row_idx < mixed_rows.size(); ++row_idx) {
-            if (local_z_direct_multicolor_row(mixed_rows[row_idx],
+            if (row_local_z_eligible[row_idx] != 0 &&
+                local_z_direct_multicolor_row(mixed_rows[row_idx],
                                               num_physical,
                                               &row_direct_component_ids[row_idx],
                                               &row_direct_component_weights[row_idx])) {
@@ -3250,8 +3335,7 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
             const int mixed_idx = mixed_mgr.mixed_index_from_filament_id(state_id, num_physical);
             if (mixed_idx < 0 || size_t(mixed_idx) >= mixed_rows.size())
                 continue;
-            const MixedFilament &mf = mixed_rows[size_t(mixed_idx)];
-            if (!local_z_eligible_mixed_row(mf))
+            if (row_local_z_eligible[size_t(mixed_idx)] == 0)
                 continue;
 
             interval.has_mixed_paint = true;
@@ -3277,7 +3361,7 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
         }
         std::vector<LocalZActivePair> row_active_pairs(mixed_rows.size());
         for (size_t row_idx = 0; row_idx < row_active_this_layer.size(); ++row_idx) {
-            if (row_active_this_layer[row_idx] == 0 || !local_z_eligible_mixed_row(mixed_rows[row_idx]))
+            if (row_active_this_layer[row_idx] == 0 || row_local_z_eligible[row_idx] == 0)
                 continue;
             if (row_uses_direct_multicolor_solver[row_idx] != 0)
                 continue;
@@ -3340,7 +3424,7 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
             if (mixed_idx < 0 || size_t(mixed_idx) >= mixed_rows.size())
                 continue;
             const size_t row_idx = size_t(mixed_idx);
-            if (row_active_this_layer[row_idx] == 0 || !local_z_eligible_mixed_row(mixed_rows[row_idx]))
+            if (row_active_this_layer[row_idx] == 0 || row_local_z_eligible[row_idx] == 0)
                 continue;
             double dummy_a = 0.0, dummy_b = 0.0;
             const bool row_is_gradient = effective_gradient_heights_for_row(row_idx, layer_id, interval.base_height, dummy_a, dummy_b);
@@ -3794,7 +3878,7 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
                     single_dependency_group = 0;
                 if (preferred_a <= EPSILON && preferred_b <= EPSILON) {
                     for (size_t row_idx = 0; row_idx < row_active_this_layer.size(); ++row_idx) {
-                        if (row_active_this_layer[row_idx] == 0 || !local_z_eligible_mixed_row(mixed_rows[row_idx]))
+                        if (row_active_this_layer[row_idx] == 0 || row_local_z_eligible[row_idx] == 0)
                             continue;
                         if (row_uses_direct_multicolor_solver[row_idx] != 0) {
                             row_direct_pass_sequences[row_idx] =
@@ -3879,8 +3963,7 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
                         const unsigned int state_id = row_state_ids[row_idx];
                         if (state_id == 0)
                             continue;
-                        const MixedFilament &mf = mixed_rows[row_idx];
-                        if (!local_z_eligible_mixed_row(mf))
+                        if (row_local_z_eligible[row_idx] == 0)
                             continue;
                         const LocalZActivePair &active_pair = row_active_pairs[row_idx];
                         const bool uses_direct_multicolor = row_uses_direct_multicolor_solver[row_idx] != 0;
@@ -4010,8 +4093,7 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
                 const unsigned int state_id = row_state_ids[row_idx];
                 if (state_id == 0)
                     continue;
-                const MixedFilament &mixed_row = mixed_rows[row_idx];
-                if (!local_z_eligible_mixed_row(mixed_row))
+                if (row_local_z_eligible[row_idx] == 0)
                     continue;
                 row_seen_in_interval[row_idx] = uint8_t(1);
                 ++forced_height_resolve_calls;
@@ -4139,6 +4221,18 @@ static inline void apply_mm_segmentation(PrintObject &print_object, std::vector<
     const bool                collapse_mixed_regions_effective = collapse_mixed_regions;
     const size_t              num_channels = segmentation.empty() ? 0 : segmentation.front().size();
 
+    // Channels of mixed rows that Local-Z subdivides stay virtual instead of collapsing to the layer's
+    // physical filament: the planner's sub-layer passes claim them.
+    const bool direct_multicolor_solver =
+        bool_from_full_config(full_cfg, "dithering_local_z_direct_multicolor", print_cfg.dithering_local_z_direct_multicolor.value) &&
+        preferred_a <= EPSILON && preferred_b <= EPSILON;
+    std::vector<uint8_t> local_z_split_channel(num_channels, uint8_t(0));
+    if (local_z_mode)
+        for (size_t channel_idx = 1; channel_idx < num_channels; ++channel_idx)
+            if (const MixedFilament *mixed_row = mixed_mgr.mixed_filament_from_id(unsigned(channel_idx), num_physical))
+                local_z_split_channel[channel_idx] =
+                    uint8_t(local_z_eligible_mixed_row(*mixed_row, num_physical, direct_multicolor_solver));
+
     // Anchor mixed painted cadence to each independent vertical activation run
     // instead of the object's global layer zero.
     const auto mixed_zone_phase_slot = [num_channels](size_t layer_id, size_t channel_idx) {
@@ -4219,7 +4313,7 @@ static inline void apply_mm_segmentation(PrintObject &print_object, std::vector<
          preferred_b,
          base_height,
          collapse_mixed_regions_effective,
-         local_z_mode,
+         &local_z_split_channel,
          bias_mode_enabled,
          throw_on_cancel](const tbb::blocked_range<size_t> &range) {
             const auto  &layer_ranges   = print_object.shared_regions()->layer_ranges;
@@ -4310,7 +4404,7 @@ static inline void apply_mm_segmentation(PrintObject &print_object, std::vector<
                     bool collapse_this_channel = collapse_mixed_regions_effective;
                     if (collapse_this_channel) {
                         const MixedFilament *mixed_row = mixed_mgr.mixed_filament_from_id(channel_id, num_physical);
-                        if (mixed_row != nullptr && local_z_mode && local_z_eligible_mixed_row(*mixed_row))
+                        if (local_z_split_channel[channel_idx] != 0)
                             collapse_this_channel = false;
                         if (mixed_row != nullptr && mixed_row->gradient_enabled && mixed_row->component_a != mixed_row->component_b)
                             collapse_this_channel = false;
