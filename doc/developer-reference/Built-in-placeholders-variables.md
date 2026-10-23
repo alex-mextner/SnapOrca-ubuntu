@@ -90,7 +90,7 @@ This section describes the general built-in placeholders variables available for
 
 ## Presets
 
-Each preset's ([Print process settings](home#process-settings), [Filament/Material settings](home#material-settings), [Printer settings](home#printer-settings)) variables can be used in your G-code scripts and configurations.  
+Each preset's ([Print process settings](home#print-settings-tips-and-tricks-work-in-progress), [Filament/Material settings](home), [Printer settings](home#printer-settings)) variables can be used in your G-code scripts and configurations.  
 
 > [!TIP]
 > To know the variable name you can hover your mouse over the variable in the UI.

@@ -41,13 +41,13 @@ When you create a new page or section, link it from the Home page under the appr
 The Home page currently organizes content in these top-level entries:
 
 - ![printer](https://github.com/SoftFever/OrcaSlicer/blob/main/resources/images/printer.svg?raw=true) [Printer Settings](home#printer-settings)
-- ![filament](https://github.com/SoftFever/OrcaSlicer/blob/main/resources/images/filament.svg?raw=true) [Material Settings](home#material-settings)
-- ![process](https://github.com/SoftFever/OrcaSlicer/blob/main/resources/images/process.svg?raw=true) [Process Settings](home#process-settings)
-- ![tab_3d_active](https://github.com/SoftFever/OrcaSlicer/blob/main/resources/images/tab_3d_active.svg?raw=true) [Prepare](home#prepare)
-- ![tab_calibration_active](https://github.com/SoftFever/OrcaSlicer/blob/main/resources/images/tab_calibration_active.svg?raw=true) [Calibrations](home#calibrations)
+- ![filament](https://github.com/SoftFever/OrcaSlicer/blob/main/resources/images/filament.svg?raw=true) [Material Settings](home)
+- ![process](https://github.com/SoftFever/OrcaSlicer/blob/main/resources/images/process.svg?raw=true) [Process Settings](home#print-settings-tips-and-tricks-work-in-progress)
+- ![tab_3d_active](https://github.com/SoftFever/OrcaSlicer/blob/main/resources/images/tab_3d_active.svg?raw=true) [Prepare](home)
+- ![tab_calibration_active](https://github.com/SoftFever/OrcaSlicer/blob/main/resources/images/tab_calibration_active.svg?raw=true) [Calibrations](home#printer-calibration)
 - ![im_code](https://github.com/SoftFever/OrcaSlicer/blob/main/resources/images/im_code.svg?raw=true) [Developer Section](home#developer-section)
 
-Each section can have multiple pages covering specific topics. For example, the [Process Settings](home#process-settings) section includes pages on [quality](home#quality-settings), [support](home#support-settings), and [others](home#others-settings).
+Each section can have multiple pages covering specific topics. For example, the [Process Settings](home#print-settings-tips-and-tricks-work-in-progress) section includes pages on [quality](home#quality-settings), [support](home), and [others](home).
 
 #### Index and Navigation
 
