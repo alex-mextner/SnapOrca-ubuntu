@@ -9,8 +9,8 @@
 #       'scripts/ubuntu2604/server-gui-smoke.sh ~/work/NAME/build/Snapmaker_Orca_Linux_V2.4.0.AppImage mesa'
 #
 # runs it under ~/build.lock like every heavy server job (this script takes no lock itself). It needs the
-# rootless server environment (server-env.sh install runs here, idempotently) including the classic
-# gdk-pixbuf that replaces the glycin/bubblewrap loaders the server cannot run (CLASSIC_PIXBUF_* in server-env.sh).
+# rootless server environment (server-env.sh install and install-gui run here, idempotently), including the
+# classic gdk-pixbuf that replaces the glycin/bubblewrap loaders the server cannot run (CLASSIC_PIXBUF_* there).
 #
 # Usage: server-gui-smoke.sh APPIMAGE LABEL
 # Output (GUI_SMOKE_DIR, default ~/work/gui-smoke, then LABEL/): shots/03-prepare.png (whole screen),
@@ -29,6 +29,7 @@ PREPARE_TAB_DX=${PREPARE_TAB_DX:-126} PREPARE_TAB_DY=${PREPARE_TAB_DY:-44}
 HERE=$(dirname "$(readlink -f "$0")")
 
 bash "$HERE/server-env.sh" install || die 2 "server-env.sh install failed"
+bash "$HERE/server-env.sh" install-gui || die 2 "server-env.sh install-gui failed"
 # shellcheck disable=SC1091
 source "$HERE/server-env.sh"
 server_env_gui_activate || die 2 "server_env_gui_activate failed"
@@ -42,7 +43,13 @@ echo "== $(basename "$APP") sha256 $(sha256sum "$APP" | cut -d' ' -f1)"
 (cd "$W/extract" && "$APP" --appimage-extract >/dev/null) || die 2 "cannot extract $APP"
 ROOT=$W/extract/squashfs-root
 [[ -x $ROOT/AppRun ]] || die 2 "no AppRun in the extracted AppImage"
-"$HERE/check-gl-backend.sh" "$ROOT/bin/snapmaker-orca" || { echo "FAIL: the AppImage canvas is not built for GLX"; exit 1; }
+"$HERE/check-gl-backend.sh" "$ROOT/bin/snapmaker-orca"
+rc=$?
+case $rc in
+    0) ;;
+    1) echo "FAIL $LABEL: the AppImage canvas is not built for GLX"; exit 1 ;;
+    *) die 2 "check-gl-backend.sh could not check $ROOT/bin/snapmaker-orca" ;;
+esac
 
 # A display number nobody uses, so a concurrent Xvfb (a GUI test of another checkout) is left alone.
 for n in $(seq 90 99); do
@@ -88,8 +95,7 @@ APPDIR=$ROOT "$ROOT/AppRun" --datadir "$W/data" >"$W/app.log" 2>&1 &
 RUNNER=$!
 log "app=$APP pid=$RUNNER display=$GUI_DISPLAY"
 
-wait_win '^Setup Wizard' 240 >/dev/null || fail "no setup wizard (the app exited or hung; see $W/app.log and $W/data/log)"
-close_wizard 01 5 || fail "setup wizard did not close"
+close_wizard 01 240 || fail "no setup wizard window (the app exited or hung; see $W/app.log and $W/data/log)"
 wid=$(wait_win 'Untitled' 120) || fail "main window did not appear (see $W/app.log)"
 log "main window $wid"
 sleep 3 # let the home page settle

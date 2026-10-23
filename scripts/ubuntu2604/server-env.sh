@@ -4,9 +4,11 @@
 # and unpacked with `dpkg -x` into $SERVER_ENV (default ~/sysroot); CMake 3.30 comes from the
 # Kitware tarball. Dependencies are resolved by `apt-get -s install` against what the host has.
 #
-#   scripts/ubuntu2604/server-env.sh install   # idempotent; run on the server (server-build.sh does it)
-#   source scripts/ubuntu2604/server-env.sh    # PATH, PKG_CONFIG_PATH, CMAKE_PREFIX_PATH, LD_LIBRARY_PATH, ...
-#   server_env_gui_activate                    # after sourcing: GUI runs (classic gdk-pixbuf, locales, WebKit paths), see below
+#   scripts/ubuntu2604/server-env.sh install       # idempotent; run on the server (server-build.sh does it)
+#   scripts/ubuntu2604/server-env.sh install-gui   # idempotent, after install: what headless GUI runs add (classic
+#                                                  # gdk-pixbuf, locales, WebKit helper path); server-gui-smoke.sh runs it
+#   source scripts/ubuntu2604/server-env.sh        # PATH, PKG_CONFIG_PATH, CMAKE_PREFIX_PATH, LD_LIBRARY_PATH, ...
+#   server_env_gui_activate                        # after sourcing: switches those GUI extras on for a GUI run
 #
 # Re-running `install` after a change of PACKAGES/CMAKE_VERSION refreshes only what differs.
 SERVER_ENV=${SERVER_ENV:-$HOME/sysroot}
@@ -125,8 +127,15 @@ SHIM
         printf '%s' "$want" >"$stamp"
     fi
     echo "server-env: installed in $SERVER_ENV"
-    server_env_install_classic_pixbuf
     server_env_install_ldconfig_shim
+)
+
+# What only headless GUI runs need (server-gui-smoke.sh runs this; build jobs must not depend on it, it downloads
+# and patches things): classic gdk-pixbuf, locales, the WebKit helper path. Idempotent.
+server_env_install_gui() (
+    set -euo pipefail
+    [[ -e $SERVER_ENV/.packages.sha ]] || { echo "server-env: run 'install' before 'install-gui'" >&2; return 1; }
+    server_env_install_classic_pixbuf
     server_env_install_locales
     server_env_install_webkit_path
 )
@@ -268,8 +277,11 @@ server_env_gui_activate() {
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
     set -euo pipefail
-    [[ ${1:-} == install ]] || { echo "usage: server-env.sh install | source server-env.sh" >&2; exit 2; }
-    server_env_install
+    case ${1:-} in
+        install) server_env_install ;;
+        install-gui) server_env_install_gui ;;
+        *) echo "usage: server-env.sh install | install-gui | source server-env.sh" >&2; exit 2 ;;
+    esac
 else
     server_env_activate
 fi
