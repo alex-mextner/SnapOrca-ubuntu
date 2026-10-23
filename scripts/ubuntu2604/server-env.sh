@@ -4,8 +4,11 @@
 # and unpacked with `dpkg -x` into $SERVER_ENV (default ~/sysroot); CMake 3.30 comes from the
 # Kitware tarball. Dependencies are resolved by `apt-get -s install` against what the host has.
 #
-#   scripts/ubuntu2604/server-env.sh install   # idempotent; run on the server (server-build.sh does it)
-#   source scripts/ubuntu2604/server-env.sh    # PATH, PKG_CONFIG_PATH, CMAKE_PREFIX_PATH, LD_LIBRARY_PATH, ...
+#   scripts/ubuntu2604/server-env.sh install       # idempotent; run on the server (server-build.sh does it)
+#   scripts/ubuntu2604/server-env.sh install-gui   # idempotent, after install: what headless GUI runs add (classic
+#                                                  # gdk-pixbuf, locales, WebKit helper path); server-gui-smoke.sh runs it
+#   source scripts/ubuntu2604/server-env.sh        # PATH, PKG_CONFIG_PATH, CMAKE_PREFIX_PATH, LD_LIBRARY_PATH, ...
+#   server_env_gui_activate                        # after sourcing: switches those GUI extras on for a GUI run
 #
 # Re-running `install` after a change of PACKAGES/CMAKE_VERSION refreshes only what differs.
 SERVER_ENV=${SERVER_ENV:-$HOME/sysroot}
@@ -19,6 +22,17 @@ PACKAGES="autoconf build-essential ccache curl eglexternalplatform-dev extra-cma
  libunwind-dev libwayland-dev libwebkit2gtk-4.1-dev libxkbcommon-dev m4 ninja-build pkgconf texinfo
  wayland-protocols xz-utils
  xvfb openbox xdotool wmctrl imagemagick x11-utils x11-xserver-utils mesa-utils xauth"
+
+# Classic (non-sandboxed) gdk-pixbuf for headless GUI runs: Ubuntu 26.04's gdk-pixbuf 2.44 has no loaders of its
+# own, it decodes every image through glycin, which starts bubblewrap, and the server forbids the unprivileged
+# user namespaces bwrap needs ("setting up uid map: Permission denied"), so GTK aborts with "No image loaders are
+# configured". The last release with classic loaders (png/jpeg built in) is unpacked next to the sysroot and only
+# server_env_gui_activate puts it on the library path, so builds still link against the 26.04 gdk-pixbuf.
+CLASSIC_PIXBUF_DEB=${CLASSIC_PIXBUF_DEB:-libgdk-pixbuf-2.0-0_2.42.10+dfsg-3ubuntu3.3_amd64.deb}
+CLASSIC_PIXBUF_URL=${CLASSIC_PIXBUF_URL:-https://archive.ubuntu.com/ubuntu/pool/main/g/gdk-pixbuf/$CLASSIC_PIXBUF_DEB}
+CLASSIC_PIXBUF_SHA256=${CLASSIC_PIXBUF_SHA256:-de84e0d777d9c9e39148d8491338e6b8c62bc2d066867266b1643a7a725a86ba}
+CLASSIC_PIXBUF_DIR=$SERVER_ENV/classic-pixbuf
+WEBKIT_PATCHED_DIR=$SERVER_ENV/webkit-patched
 
 server_env_install() (
     set -euo pipefail
@@ -113,6 +127,106 @@ SHIM
         printf '%s' "$want" >"$stamp"
     fi
     echo "server-env: installed in $SERVER_ENV"
+    server_env_install_ldconfig_shim
+)
+
+# What only headless GUI runs need (server-gui-smoke.sh runs this; build jobs must not depend on it, it downloads
+# and patches things): classic gdk-pixbuf, locales, the WebKit helper path. Idempotent.
+server_env_install_gui() (
+    set -euo pipefail
+    [[ -e $SERVER_ENV/.packages.sha ]] || { echo "server-env: run 'install' before 'install-gui'" >&2; return 1; }
+    server_env_install_classic_pixbuf
+    server_env_install_locales
+    server_env_install_webkit_path
+)
+
+# Snapmaker Orca exits at startup ("Switching language failed") when neither the system language nor en_GB is a
+# locale the host has, and the server has only C/POSIX: compile en_US and en_GB into $SERVER_ENV/locale
+# (localedef is rootless with --no-archive; server_env_gui_activate sets LOCPATH). Idempotent.
+server_env_install_locales() (
+    set -euo pipefail
+    local l
+    for l in en_US en_GB; do
+        [[ -f $SERVER_ENV/locale/$l.UTF-8/LC_CTYPE ]] && continue
+        mkdir -p "$SERVER_ENV/locale"
+        # localedef exits 1 on warnings about the locale source (e.g. unknown keywords) but still writes it.
+        localedef --no-archive -i "$l" -f UTF-8 "$SERVER_ENV/locale/$l.UTF-8" || [[ -f $SERVER_ENV/locale/$l.UTF-8/LC_CTYPE ]]
+    done
+)
+
+# WebKitGTK of the sysroot looks for WebKitWebProcess & co. in its compiled-in /usr/lib/x86_64-linux-gnu/webkit2gtk-4.1
+# (root-owned, absent on the server) and ignores WEBKIT_EXEC_PATH in a release build, so every web view aborts the
+# app ("Unable to spawn a new child process"). A copy of libwebkit2gtk with that prefix replaced by /dev/shm/webkit2gtk-4.1
+# (padded with slashes to the same length) goes to $WEBKIT_PATCHED_DIR; server_env_gui_activate links that path to the
+# sysroot's directory, the same way xkbcomp is reached for Xvfb. Idempotent.
+server_env_install_webkit_path() (
+    set -euo pipefail
+    local src dst
+    src=$(readlink -f "$SERVER_ENV/usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0")
+    dst=$WEBKIT_PATCHED_DIR/libwebkit2gtk-4.1.so.0
+    [[ $dst -nt $src ]] && return 0
+    mkdir -p "$WEBKIT_PATCHED_DIR"
+    python3 - "$src" "$dst" <<'PY'
+import sys
+src, dst = sys.argv[1:]
+old = b"/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1"
+new = b"/dev/shm/webkit2gtk-4.1".ljust(len(old), b"/")
+assert len(new) == len(old)  # the patch must not move anything in the library
+data = open(src, "rb").read()
+if data.count(old) != 2:
+    sys.exit(f"server-env: {src} has {data.count(old)} occurrences of {old.decode()}, expected 2")
+open(dst + ".tmp", "wb").write(data.replace(old, new))
+PY
+    mv "$dst.tmp" "$dst"
+)
+
+# The AppImage's libexec/snapmaker-orca-env refuses to start unless `ldconfig -p` (or /usr/lib*) lists
+# libOpenGL.so.0 and the WebKitGTK 4.1 libraries, which only exist in the sysroot here: the shim makes
+# `ldconfig -p` also list every library of the sysroot (the grep there needs a leading space, not a tab).
+# Regenerated on every install, so it follows the sysroot's location.
+server_env_install_ldconfig_shim() (
+    set -euo pipefail
+    mkdir -p "$SERVER_ENV/shim"
+    cat >"$SERVER_ENV/shim/ldconfig" <<SHIM
+#!/usr/bin/env bash
+real=/usr/sbin/ldconfig
+if [[ \${1:-} == -p ]]; then
+    "\$real" -p
+    for f in "$SERVER_ENV"/usr/lib/x86_64-linux-gnu/lib*.so.*; do
+        printf '  %s (libc6,x86-64) => %s\n' "\${f##*/}" "\$f"
+    done
+    exit 0
+fi
+exec "\$real" "\$@"
+SHIM
+    chmod +x "$SERVER_ENV/shim/ldconfig"
+)
+
+# Unpacks the classic gdk-pixbuf (see CLASSIC_PIXBUF_*) and writes its loaders.cache; idempotent.
+server_env_install_classic_pixbuf() (
+    set -euo pipefail
+    local lib=$CLASSIC_PIXBUF_DIR/usr/lib/x86_64-linux-gnu sysroot_loaders
+    [[ -f $CLASSIC_PIXBUF_DIR/loaders.cache && $(cat "$CLASSIC_PIXBUF_DIR/.stamp" 2>/dev/null) == "$CLASSIC_PIXBUF_SHA256 $SERVER_ENV" ]] && return 0
+    rm -rf "$CLASSIC_PIXBUF_DIR"
+    mkdir -p "$CLASSIC_PIXBUF_DIR"
+    curl -fsSL -o "$CLASSIC_PIXBUF_DIR/pixbuf.deb" "$CLASSIC_PIXBUF_URL"
+    echo "$CLASSIC_PIXBUF_SHA256  $CLASSIC_PIXBUF_DIR/pixbuf.deb" | sha256sum -c --quiet -
+    dpkg -x "$CLASSIC_PIXBUF_DIR/pixbuf.deb" "$CLASSIC_PIXBUF_DIR"
+    rm "$CLASSIC_PIXBUF_DIR/pixbuf.deb"
+    # The sysroot's librsvg loader (SVG icons) is built against the 26.04 gdk-pixbuf and works with the classic
+    # one too; it is listed in the cache when it loads.
+    sysroot_loaders=$SERVER_ENV/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders
+    LD_LIBRARY_PATH="$lib:$SERVER_ENV/usr/lib/x86_64-linux-gnu:$SERVER_ENV/usr/lib" \
+        GDK_PIXBUF_MODULEDIR="$lib/gdk-pixbuf-2.0/2.10.0/loaders" \
+        "$lib/gdk-pixbuf-2.0/gdk-pixbuf-query-loaders" "$lib"/gdk-pixbuf-2.0/2.10.0/loaders/*.so "$sysroot_loaders"/libpixbufloader_svg.so \
+        >"$CLASSIC_PIXBUF_DIR/loaders.cache" 2>"$CLASSIC_PIXBUF_DIR/query-loaders.log" || true
+    # The cache holds absolute paths and no entry means GTK finds no image loaders: fail now, not at run time.
+    grep -q libpixbufloader-bmp "$CLASSIC_PIXBUF_DIR/loaders.cache" || {
+        echo "server-env: classic gdk-pixbuf loaders.cache lists no loaders (see $CLASSIC_PIXBUF_DIR/query-loaders.log)" >&2
+        return 1
+    }
+    printf '%s' "$CLASSIC_PIXBUF_SHA256 $SERVER_ENV" >"$CLASSIC_PIXBUF_DIR/.stamp"
+    echo "server-env: classic gdk-pixbuf installed in $CLASSIC_PIXBUF_DIR"
 )
 
 server_env_activate() {
@@ -141,10 +255,33 @@ server_env_activate() {
     export M4="$p/usr/bin/m4" CMAKE_GENERATOR=Ninja
 }
 
+# Environment for running the GTK app headless on the server (after server_env_activate): the classic gdk-pixbuf and
+# the patched libwebkit2gtk first on the library path, en_US/en_GB locales, WebKit without bubblewrap (the server
+# forbids its user namespaces) and without GPU compositing, Mesa as the EGL vendor (WebKit's web process aborts with
+# "Could not create default EGL display" without it) and the GSettings schemas of the sysroot.
+server_env_gui_activate() {
+    local lib=$CLASSIC_PIXBUF_DIR/usr/lib/x86_64-linux-gnu
+    export LD_LIBRARY_PATH="$WEBKIT_PATCHED_DIR:$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export GDK_PIXBUF_MODULEDIR="$lib/gdk-pixbuf-2.0/2.10.0/loaders" GDK_PIXBUF_MODULE_FILE="$CLASSIC_PIXBUF_DIR/loaders.cache"
+    # /dev/shm is world-writable and sticky: a link somebody else made there cannot be replaced, and must not be followed.
+    ln -sfn "$SERVER_ENV/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1" /dev/shm/webkit2gtk-4.1
+    if [[ $(readlink /dev/shm/webkit2gtk-4.1) != "$SERVER_ENV/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1" ]]; then
+        echo "server-env: /dev/shm/webkit2gtk-4.1 does not point into $SERVER_ENV (another user's sysroot?)" >&2
+        return 1
+    fi
+    export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1
+    export __EGL_VENDOR_LIBRARY_FILENAMES="$SERVER_ENV/usr/share/glvnd/egl_vendor.d/50_mesa.json"
+    export LOCPATH="$SERVER_ENV/locale"
+    export GSETTINGS_SCHEMA_DIR="$SERVER_ENV/usr/share/glib-2.0/schemas"
+}
+
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
     set -euo pipefail
-    [[ ${1:-} == install ]] || { echo "usage: server-env.sh install | source server-env.sh" >&2; exit 2; }
-    server_env_install
+    case ${1:-} in
+        install) server_env_install ;;
+        install-gui) server_env_install_gui ;;
+        *) echo "usage: server-env.sh install | install-gui | source server-env.sh" >&2; exit 2 ;;
+    esac
 else
     server_env_activate
 fi

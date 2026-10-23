@@ -3,10 +3,11 @@
 # container (or on the throwaway machine of SO_DIRECT=1), never on the laptop. The caller sets W
 # (work dir) before sourcing and RUNNER (pid of app-runner.py) once the app is started; wait_win
 # stops early when RUNNER is gone.
-# Provides: log, shot, start_display (fake browsers + private Xvfb :99 + openbox), wait_win,
+# Provides: log, shot, start_display (fake browsers + private Xvfb $GUI_DISPLAY, default :99, + openbox), wait_win,
 # wait_gone, wait_line, click_button, close_window, close_wizard, close_main.
 
-export DISPLAY=:99 HOME=$W/home APPIMAGE_EXTRACT_AND_RUN=1 NO_AT_BRIDGE=1
+GUI_DISPLAY=${GUI_DISPLAY:-:99}
+export DISPLAY=$GUI_DISPLAY HOME=$W/home APPIMAGE_EXTRACT_AND_RUN=1 NO_AT_BRIDGE=1
 # The fork's AppRun points the statically linked OpenSSL at the system CA bundle; an AppImage
 # without that (Snapmaker main) otherwise stops at a "use system SSL certificate" dialog on start.
 if [ -z "${SSL_CERT_FILE:-}" ] && [ -r /etc/ssl/certs/ca-certificates.crt ]; then
@@ -28,7 +29,7 @@ start_display() {
     done
     export PATH=$W/fakebin:$PATH BROWSER=$W/fakebin/xdg-open
 
-    Xvfb :99 -screen 0 1600x1000x24 -nolisten tcp >"$W/xvfb.log" 2>&1 &
+    Xvfb "$GUI_DISPLAY" -screen 0 1600x1000x24 -nolisten tcp >"$W/xvfb.log" 2>&1 &
     for _ in $(seq 50); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.2; done
     xdpyinfo >/dev/null 2>&1 || { log "Xvfb did not start"; return 1; }
     openbox >"$W/openbox.log" 2>&1 &
