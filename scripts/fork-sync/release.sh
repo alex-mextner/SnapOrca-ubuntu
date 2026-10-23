@@ -19,9 +19,12 @@
 # Snapmaker release), which review-cli truncates and therefore never stamps, so a conflicted
 # merge could not be committed. A merge without conflicts runs no pre-commit hook.
 #
-# BUILD_BACKEND=runpod (default when a Runpod API key is configured) builds and tests on a
-# temporary Runpod CPU pod (scripts/ubuntu2604/remote-build.sh, ~$1/h, deleted afterwards);
-# BUILD_BACKEND=local builds in the local container and occupies all cores of this machine.
+# BUILD_BACKEND=server (default) builds and tests on the build server (scripts/ubuntu2604/server-build.sh,
+# $SERVER, work dir ~/work/$SERVER_BUILD_NAME, so a rebuild is incremental) and fetches the AppImage;
+# BUILD_BACKEND=runpod builds and tests on a temporary Runpod CPU pod (scripts/ubuntu2604/remote-build.sh,
+# ~$1/h, deleted afterwards); BUILD_BACKEND=local builds in the local container and occupies all cores
+# of this machine. The CLI smoke slice (scripts/fork-sync/smoke-slice.sh) runs on the server for the
+# server backend, in the build container otherwise.
 #
 # The build bump commit goes through this host's review-before-commit git hook, which accepts
 # it only after `review diff --staged` passed on exactly that staged diff. release.sh stages
@@ -36,16 +39,15 @@ set -euo pipefail
 ROOT=$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)
 cd "$ROOT"
 
-FORK_REPO=${FORK_REPO:-alex-mextner/SnapOrca}
-FORK_REMOTE=${FORK_REMOTE:-fork}
+FORK_REPO=${FORK_REPO:-alex-mextner/SnapOrca-ubuntu}
+FORK_REMOTE=${FORK_REMOTE:-origin}
 BRANCH=${BRANCH:-ubuntu-26.04}
 UPSTREAM_URL=https://github.com/Snapmaker/OrcaSlicer.git
 BUILD_IMAGE=snap-orca-build:26.04
-if [[ -n ${RUNPOD_API_KEY:-} ]] || grep -qs '^apikey *= *"..*"' "$HOME/.runpod/config.toml"; then
-    BUILD_BACKEND=${BUILD_BACKEND:-runpod}
-else
-    BUILD_BACKEND=${BUILD_BACKEND:-local}
-fi
+# AGENTS.md: builds run on the build server; Runpod or the local container only when asked for.
+BUILD_BACKEND=${BUILD_BACKEND:-server}
+SERVER=${SERVER:-ultra@65.21.40.51}
+SERVER_BUILD_NAME=${SERVER_BUILD_NAME:-release}
 
 die() { echo "release.sh: $1" >&2; exit "${2:-1}"; }
 
@@ -157,7 +159,17 @@ fi
 
 appimage="build/Snapmaker_Orca_Linux_V$version.AppImage"
 rm -f "$appimage"
-if [[ $BUILD_BACKEND == runpod ]]; then
+if [[ $BUILD_BACKEND == server ]]; then
+    echo "== build + tests on the build server ($SERVER, work dir ~/work/$SERVER_BUILD_NAME)"
+    # Same sequence as the local path; the build_linux.sh -i flag builds the AppImage. -j8: the test
+    # sources (test_mixed_filament.cpp) need several GB each and 16 parallel compiles got cc1plus
+    # OOM-killed on the 30 GB server. Exit codes 11 (build) and 12 (tests) come back through server-build.sh.
+    scripts/ubuntu2604/server-build.sh --name "$SERVER_BUILD_NAME" --cmd \
+        './build_linux.sh -dstir || exit 11; cmake --build build --config Release -j8 || exit 11; (cd build && ctest -C Release -j1 --output-on-failure --no-tests=error) || exit 12' ||
+        { rc=$?; die "server build/tests failed" "$rc"; }
+    mkdir -p build
+    scp -q "$SERVER:work/$SERVER_BUILD_NAME/$appimage" "$appimage" || die "could not fetch the AppImage from $SERVER" 11
+elif [[ $BUILD_BACKEND == runpod ]]; then
     echo "== build + tests on a Runpod pod"
     scripts/ubuntu2604/remote-build.sh || { rc=$?; die "remote build failed" "$rc"; }
 else
@@ -174,26 +186,15 @@ fi
 [[ -x "$appimage" ]] || die "missing $appimage" 11
 
 echo "== smoke: CLI slice with Snapmaker U1 profiles"
-smoke=$(mktemp -d)
-scripts/flatten_profile.py -o "$smoke/profiles" \
-    --machine "Snapmaker U1 (0.4 nozzle)" \
-    --process "0.20mm Standard @Snapmaker U1 (0.4 nozzle)" \
-    --filament "Snapmaker PLA Basic @U1" >/dev/null
-# Inside the build container (no host /dev, no USB), like everything else this script runs.
-docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$ROOT:$ROOT" -v "$smoke:$smoke" -w "$ROOT" "$BUILD_IMAGE" \
-    "$ROOT/$appimage" --appimage-extract-and-run --datadir "$smoke/data" --slice 0 --outputdir "$smoke/out" \
-    --load-settings "$smoke/profiles/machine-Snapmaker U1 (0.4 nozzle).json;$smoke/profiles/process-0.20mm Standard @Snapmaker U1 (0.4 nozzle).json" \
-    --load-filaments "$smoke/profiles/filament-Snapmaker PLA Basic @U1.json" \
-    tests/data/20mm_cube.obj >"$smoke/slice.log" 2>&1 || die "smoke slice crashed, see $smoke/slice.log" 13
-python3 - "$smoke/out" <<'EOF' || die "smoke slice produced no valid G-code, see $smoke" 13
-import json, pathlib, sys
-out = pathlib.Path(sys.argv[1])
-result = json.loads((out / "result.json").read_text())
-gcode = (out / "plate_1.gcode").read_text(errors="replace")
-assert result["return_code"] == 0, result
-assert gcode.count(";LAYER_CHANGE") > 10 and "printer_model = Snapmaker U1" in gcode
-EOF
-rm -rf "$smoke"
+# Inside the build container (no host /dev, no USB) or on the build server, like everything else
+# this script runs.
+if [[ $BUILD_BACKEND == server ]]; then
+    scripts/ubuntu2604/server-build.sh --name "$SERVER_BUILD_NAME" --cmd "scripts/fork-sync/smoke-slice.sh $appimage" ||
+        { rc=$?; die "smoke slice failed" "$rc"; }
+else
+    docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$ROOT:$ROOT" -w "$ROOT" "$BUILD_IMAGE" \
+        scripts/fork-sync/smoke-slice.sh "$appimage" || die "smoke slice failed" 13
+fi
 
 echo "== assemble dist/"
 rm -rf dist && mkdir -p dist
