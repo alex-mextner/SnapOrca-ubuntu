@@ -23,4 +23,4 @@ rm -rf /var/lib/apt/lists/*
 
 curl -fsSL "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" \
     | tar -xz -C /opt
-ln -sf /opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/* /usr/local/bin/
+ln -sf /opt/cmake-"${CMAKE_VERSION}"-linux-x86_64/bin/* /usr/local/bin/
