@@ -11,10 +11,10 @@
 #include <cmath>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <numeric>
-#include <unordered_map>
 #include <vector>
 
 #include <boost/next_prior.hpp>
@@ -30,14 +30,12 @@
 #include <CGAL/Cartesian_converter.h>
 #include <CGAL/Polygon_mesh_processing/connected_components.h>
 #include <CGAL/Polygon_mesh_processing/intersection.h>
-#include <CGAL/Polygon_mesh_processing/polygon_mesh_to_polygon_soup.h>
 #include <CGAL/Side_of_triangle_mesh.h>
 #include <CGAL/Polygon_mesh_processing/orient_polygon_soup.h>
 #include <CGAL/Polygon_mesh_processing/polygon_soup_to_polygon_mesh.h>
 #include <CGAL/Polygon_mesh_processing/self_intersections.h>
 #include <CGAL/Polygon_mesh_processing/repair.h>
 #include <CGAL/Polygon_mesh_processing/remesh.h>
-#include <CGAL/Polygon_mesh_processing/repair_polygon_soup.h>
 #include <CGAL/Polygon_mesh_processing/orientation.h>
 #include <CGAL/Polygon_mesh_processing/border.h>
 #include <CGAL/Polygon_mesh_processing/triangulate_hole.h>
@@ -50,6 +48,8 @@
 #include <CGAL/boost/graph/Face_filtered_graph.h>
 // BBS: for boolean using mcut
 #include "mcut/include/mcut/mcut.h"
+// Orca: mesh repair ("Fix model"), C ABI of deps_src/meshfix
+#include "meshfix.h"
 
 namespace Slic3r {
 namespace MeshBoolean {
@@ -502,103 +502,6 @@ namespace {
 using SoupPoint   = _EpicMesh::Point;
 using SoupPolygon = std::vector<std::size_t>;
 
-// Orca: Points closer than this, relative to the size of the part, are one point, but never farther apart than
-// weld_tolerance_max (mm), so that the narrow gaps of large parts survive. The seams of meshes converted from STEP
-// differ by sub-micron noise, which the exact merge of repair_polygon_soup() leaves open.
-constexpr double weld_tolerance_relative = 1e-5;
-constexpr double weld_tolerance_max      = 1e-3;
-
-// Orca: Makes the polygons refer to one point of each cluster of points closer than tolerance; the points left unused
-// and the polygons that collapse are removed by repair_polygon_soup().
-void weld_close_points(const std::vector<SoupPoint> &points, std::vector<SoupPolygon> &polygons, double tolerance)
-{
-    using Cell = std::array<int64_t, 3>;
-    struct CellHash
-    {
-        size_t operator()(const Cell &c) const
-        {
-            // Unsigned, so that the multiplications wrap around instead of overflowing.
-            return size_t(uint64_t(c[0]) * 73856093u ^ uint64_t(c[1]) * 19349663u ^ uint64_t(c[2]) * 83492791u);
-        }
-    };
-    const auto cell_of = [tolerance](const SoupPoint &p) {
-        return Cell{int64_t(std::floor(p.x() / tolerance)), int64_t(std::floor(p.y() / tolerance)), int64_t(std::floor(p.z() / tolerance))};
-    };
-
-    // Only the first point of each cluster is in the grid, so every point maps directly to its cluster's point.
-    std::unordered_map<Cell, std::vector<size_t>, CellHash> grid;
-    std::vector<size_t>                                     cluster_point(points.size());
-    const double                                            tolerance_sq = tolerance * tolerance;
-    for (size_t i = 0; i < points.size(); ++i) {
-        const Cell cell  = cell_of(points[i]);
-        size_t     found = i;
-        for (int64_t dx = -1; dx <= 1 && found == i; ++dx)
-            for (int64_t dy = -1; dy <= 1 && found == i; ++dy)
-                for (int64_t dz = -1; dz <= 1 && found == i; ++dz) {
-                    const auto it = grid.find(Cell{cell[0] + dx, cell[1] + dy, cell[2] + dz});
-                    if (it == grid.end())
-                        continue;
-                    for (size_t j : it->second)
-                        if (CGAL::squared_distance(points[i], points[j]) <= tolerance_sq) {
-                            found = j;
-                            break;
-                        }
-                }
-        cluster_point[i] = found;
-        if (found == i)
-            grid[cell].push_back(i);
-    }
-    for (SoupPolygon &polygon : polygons)
-        for (size_t &v : polygon)
-            v = cluster_point[v];
-}
-
-// Orca: Splits a border cycle that passes through the same point more than once into simple loops and appends them to
-// loops. Returns false and appends nothing when the cycle is simple. Loops of two points close up once the copies of
-// their points are merged, they are dropped.
-bool split_at_repeated_points(const std::vector<SoupPoint> &cycle, std::vector<std::vector<SoupPoint>> &loops)
-{
-    std::map<SoupPoint, size_t> position_on_stack;
-    std::vector<SoupPoint>      stack;
-    bool                        repeated = false;
-    for (const SoupPoint &p : cycle) {
-        const auto it = position_on_stack.find(p);
-        if (it == position_on_stack.end()) {
-            position_on_stack.emplace(p, stack.size());
-            stack.push_back(p);
-            continue;
-        }
-        // Close the loop that started at the earlier occurrence of p; p stays on the stack.
-        repeated           = true;
-        const size_t start = it->second;
-        if (stack.size() - start >= 3)
-            loops.emplace_back(stack.begin() + start, stack.end());
-        for (size_t i = start + 1; i < stack.size(); ++i)
-            position_on_stack.erase(stack[i]);
-        stack.resize(start + 1);
-    }
-    if (repeated && stack.size() >= 3)
-        loops.push_back(std::move(stack));
-    return repeated;
-}
-
-// Orca: Cleans the soup up, orients it consistently (faces with inconsistent orientations cannot be stitched) and
-// converts it to a mesh. Points where the surface is not manifold are duplicated.
-_EpicMesh soup_to_mesh(std::vector<SoupPoint> &points, std::vector<SoupPolygon> &polygons)
-{
-    namespace PMP = CGAL::Polygon_mesh_processing;
-
-    PMP::repair_polygon_soup(points, polygons);
-    PMP::orient_polygon_soup(points, polygons);
-    _EpicMesh cgal_mesh;
-    PMP::polygon_soup_to_polygon_mesh(points, polygons, cgal_mesh);
-
-    PMP::remove_degenerate_faces(cgal_mesh);
-    PMP::remove_isolated_vertices(cgal_mesh);
-    PMP::duplicate_non_manifold_vertices(cgal_mesh);
-    return cgal_mesh;
-}
-
 // Orca: The region the shells enclose, all of them oriented outwards, where depth[i] is the nesting level of shell i:
 // the shells at level 0 minus (the shells at level 1 minus (the shells at level 2 minus ...)). Computed from the
 // deepest shells outwards, so that a solid inside a cavity survives. Returns false when CGAL cannot compute it, e.g.
@@ -704,10 +607,80 @@ void resolve_overlapping_shells(_EpicMesh &cgal_mesh)
     cgal_mesh = std::move(oriented);
 }
 
+// Orca: Hands the mesh to libmeshfix (deps_src/meshfix, C ABI) and back. Returns false with a message when the
+// library fails; `report` is filled on success.
+bool meshfix_repair_its(const indexed_triangle_set &src, indexed_triangle_set &result, meshfix_report &report, std::string *error)
+{
+    const auto fail = [error](const std::string &message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    // float xyz and index triples as the library takes them; a negative index becomes a huge one, which the library drops
+    // as an invalid face.
+    std::vector<float> vertices;
+    vertices.reserve(src.vertices.size() * 3);
+    for (const stl_vertex &v : src.vertices)
+        vertices.insert(vertices.end(), {v.x(), v.y(), v.z()});
+    std::vector<uint32_t> faces;
+    faces.reserve(src.indices.size() * 3);
+    for (const stl_triangle_vertex_indices &f : src.indices)
+        faces.insert(faces.end(), {uint32_t(f(0)), uint32_t(f(1)), uint32_t(f(2))});
+
+    using MeshfixPtr = std::unique_ptr<meshfix_mesh, decltype(&meshfix_mesh_free)>;
+    meshfix_mesh *raw = nullptr;
+    if (meshfix_mesh_create_f32(vertices.data(), src.vertices.size(), faces.data(), src.indices.size(), &raw) != MESHFIX_OK)
+        return fail(std::string("Repair failed: ") + meshfix_last_error());
+    MeshfixPtr in(raw, &meshfix_mesh_free);
+
+    // Every repair; the self-intersection check is CGAL's, in the caller (it is exact, the library's is not).
+    meshfix_options options;
+    meshfix_options_init(&options);
+    // The smallest closed solid has four faces. The library's default of eight would drop a tetrahedral part, which
+    // the CGAL repair kept; open fragments of fewer faces are still dropped.
+    options.min_component_faces = 4;
+    options.flags &= ~uint32_t(MESHFIX_CHECK_SELF_INTERSECTIONS);
+    meshfix_report_init(&report);
+    raw = nullptr;
+    if (meshfix_repair(in.get(), &options, &raw, &report) != MESHFIX_OK)
+        return fail(std::string("Repair failed: ") + meshfix_last_error());
+    MeshfixPtr out(raw, &meshfix_mesh_free);
+
+    const size_t    vertex_count = meshfix_mesh_vertex_count(out.get());
+    const size_t    face_count   = meshfix_mesh_face_count(out.get());
+    const double   *v            = meshfix_mesh_vertices(out.get());
+    const uint32_t *f            = meshfix_mesh_faces(out.get());
+    result.vertices.clear();
+    result.indices.clear();
+    result.vertices.reserve(vertex_count);
+    result.indices.reserve(face_count);
+    for (size_t i = 0; i < vertex_count; ++i)
+        result.vertices.emplace_back(float(v[3 * i]), float(v[3 * i + 1]), float(v[3 * i + 2]));
+    for (size_t i = 0; i < face_count; ++i)
+        result.indices.emplace_back(int(f[3 * i]), int(f[3 * i + 1]), int(f[3 * i + 2]));
+    return true;
+}
+
+// Orca: The closed, consistently oriented mesh as a CGAL surface mesh, without the orientation step of
+// triangle_mesh_to_cgal(), which assumes shells that do not overlap.
+_EpicMesh its_to_surface_mesh(const indexed_triangle_set &its)
+{
+    std::vector<SoupPoint>   points;
+    std::vector<SoupPolygon> polygons;
+    points.reserve(its.vertices.size());
+    polygons.reserve(its.indices.size());
+    for (const stl_vertex &v : its.vertices)
+        points.emplace_back(v.x(), v.y(), v.z());
+    for (const stl_triangle_vertex_indices &f : its.indices)
+        polygons.push_back({size_t(f(0)), size_t(f(1)), size_t(f(2))});
+    _EpicMesh mesh;
+    CGAL::Polygon_mesh_processing::polygon_soup_to_polygon_mesh(points, polygons, mesh);
+    return mesh;
+}
+
 // Orca: repair() without its guard against crashes inside CGAL.
 bool repair_unguarded(TriangleMesh &mesh, RepairedMeshErrors *repaired_errors, std::string *error, bool *self_intersections_remain)
 {
-    using namespace CGAL;
     namespace PMP = CGAL::Polygon_mesh_processing;
 
     if (self_intersections_remain)
@@ -716,99 +689,51 @@ bool repair_unguarded(TriangleMesh &mesh, RepairedMeshErrors *repaired_errors, s
         return true;
 
     try {
-        // 1) Convert to polygon soup
-        std::vector<SoupPoint>   points;
-        std::vector<SoupPolygon> polygons;
-
-        points.reserve(mesh.its.vertices.size());
-        polygons.reserve(mesh.its.indices.size());
-
-        for (const auto& v : mesh.its.vertices)
-            points.emplace_back(v.x(), v.y(), v.z());
-
-        for (const auto& f : mesh.its.indices)
-            polygons.push_back({size_t(f[0]), size_t(f[1]), size_t(f[2])});
-
-        // 2) Weld nearly coincident points
-        // The weld grid cells are int64 coordinates: skip the weld where coord / tolerance would overflow them.
-        const BoundingBoxf3 bbox      = mesh.bounding_box();
-        const double        tolerance = std::min(bbox.size().norm() * weld_tolerance_relative, weld_tolerance_max);
-        const double        extent    = std::max(bbox.min.cwiseAbs().maxCoeff(), bbox.max.cwiseAbs().maxCoeff());
-        if (tolerance > 0. && std::isfinite(extent) && extent / tolerance < 1e15)
-            weld_close_points(points, polygons, tolerance);
-
-        // 3) Clean the soup up and convert it to a mesh without degenerate faces and non-manifold vertices
-        _EpicMesh cgal_mesh = soup_to_mesh(points, polygons);
-
-        // 4) Fill holes. Orca: before resolving self-intersections, which needs a closed mesh.
-        if (!CGAL::is_closed(cgal_mesh)) {
-            using halfedge_descriptor = boost::graph_traits<_EpicMesh>::halfedge_descriptor;
-
-            std::vector<halfedge_descriptor> borders;
-            PMP::extract_boundary_cycles(cgal_mesh, std::back_inserter(borders));
-
-            // Orca: Holes touching at a vertex (a pinch) form one border cycle that runs through copies of that
-            // vertex; filling it as one hole would connect the copies. Such cycles are filled loop by loop below.
-            std::vector<std::vector<SoupPoint>> pinched_loops;
-            bool                                pinched = false;
-            for (halfedge_descriptor h : borders) {
-                std::vector<SoupPoint> cycle;
-                for (halfedge_descriptor hh : CGAL::halfedges_around_face(h, cgal_mesh))
-                    cycle.push_back(cgal_mesh.point(target(hh, cgal_mesh)));
-                if (split_at_repeated_points(cycle, pinched_loops)) {
-                    pinched = true;
-                    continue;
-                }
-                // Orca: CGAL 5.4 has no overload without the output iterators (added in 5.6).
-                PMP::triangulate_and_refine_hole(cgal_mesh, h, CGAL::Emptyset_iterator(), CGAL::Emptyset_iterator());
-            }
-
-            if (pinched) {
-                // The copies of the pinch vertices are merged again when the soup is converted back to a mesh.
-                points.clear();
-                polygons.clear();
-                PMP::polygon_mesh_to_polygon_soup(cgal_mesh, points, polygons);
-                for (const std::vector<SoupPoint> &loop : pinched_loops) {
-                    std::vector<CGAL::Triple<int, int, int>> triangles;
-                    PMP::triangulate_hole_polyline(loop, std::back_inserter(triangles));
-                    const size_t first = points.size();
-                    points.insert(points.end(), loop.begin(), loop.end());
-                    for (const CGAL::Triple<int, int, int> &t : triangles)
-                        polygons.push_back({first + t.first, first + t.second, first + t.third});
-                }
-                cgal_mesh = soup_to_mesh(points, polygons);
-            }
+        // 1) libmeshfix: weld, degenerate and duplicate faces, T-junctions, orientation, non-manifold edges and
+        // vertices, holes, islands, cavities, and a check for self-intersections.
+        indexed_triangle_set its;
+        meshfix_report       report;
+        if (!meshfix_repair_its(mesh.its, its, report, error))
+            return false;
+        if (its.indices.empty() || its_volume(its) <= EPSILON) {
+            if (error)
+                *error = "Repair failed: the mesh does not enclose a volume.";
+            return false;
         }
-
-        // 5) Validity check
-        if (!CGAL::is_closed(cgal_mesh)) {
+        if (!report.watertight_after) {
             if (error)
                 *error = "Repair failed: mesh still open after hole filling.";
             return false;
         }
 
-        // 6) Orca: Overlapping shells become one solid, see resolve_overlapping_shells(), which leaves the
-        // self-intersections it cannot resolve.
+        // 2) Orca: The exact self-intersection test stays CGAL's (the library's check only finds faces that pierce each
+        // other, not coplanar overlaps). Overlapping shells become one solid, see resolve_overlapping_shells(), which
+        // leaves the self-intersections it cannot resolve.
+        _EpicMesh cgal_mesh = its_to_surface_mesh(its);
+        if (!CGAL::is_closed(cgal_mesh)) {
+            if (error)
+                *error = "Repair failed: mesh still open after hole filling.";
+            return false;
+        }
         bool self_intersecting = PMP::does_self_intersect(cgal_mesh);
         if (self_intersecting) {
             resolve_overlapping_shells(cgal_mesh);
             self_intersecting = PMP::does_self_intersect(cgal_mesh);
-        } else {
-            // 7) Ensure outward orientation; inner shells become cavities.
-            PMP::orient_to_bound_a_volume(cgal_mesh);
-        }
-
-        // 8) Convert back
-        indexed_triangle_set its = cgal_to_indexed_triangle_set(cgal_mesh);
-        if (its_volume(its) <= EPSILON) {
-            if (error)
-                *error = "Repair failed: the mesh does not enclose a volume.";
-            return false;
+            its               = cgal_to_indexed_triangle_set(cgal_mesh);
+            if (its_volume(its) <= EPSILON) {
+                if (error)
+                    *error = "Repair failed: the mesh does not enclose a volume.";
+                return false;
+            }
         }
 
         RepairedMeshErrors errs{};
-        errs.facets_removed = 0;
-        errs.edges_fixed    = 0;
+        const auto         saturate = [](uint64_t n) { return int(std::min<uint64_t>(n, uint64_t(std::numeric_limits<int>::max()))); };
+        errs.degenerate_facets = saturate(report.degenerate_faces_removed);
+        errs.facets_removed    = saturate(report.invalid_faces_removed + report.degenerate_faces_removed + report.duplicate_faces_removed +
+                                       report.small_components_removed + report.flat_components_removed);
+        errs.facets_reversed   = saturate(report.faces_flipped);
+        errs.edges_fixed       = saturate(report.vertices_merged + report.t_junctions_fixed + report.non_manifold_edges_before);
 
         mesh = TriangleMesh(std::move(its), errs);
 
