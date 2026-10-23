@@ -239,6 +239,18 @@ An uncached pod goes to the data centers in `RUNPOD_POD_DCS`, tried in order (de
 
 `REMOTE_EXTRA_CMD='…'` runs one more command in `build/` on the pod after the test suite, for example `REMOTE_EXTRA_CMD='ctest -C Release -R "batch lifecycle" --repeat until-fail:500'` to chase a flaky test without loading this machine. Arguments after the script name go to `ctest` (e.g. `remote-build.sh -R 'CGAL repair'`; a filter that matches no test fails the run), and `REMOTE_APPIMAGE=0` skips building and fetching the AppImage.
 
+#### Build server (65.21.40.51)
+
+The fork's default build/test host is the server `ultra@65.21.40.51` (16 cores, 30 GB, no root, no docker). `scripts/ubuntu2604/server-env.sh install` gives it a rootless toolchain: every package of `provision.sh` plus Xvfb, openbox, xdotool, wmctrl, ImageMagick, `x11-utils` and `mesa-utils` is fetched with `apt-get download`, unpacked with `dpkg -x` into `~/sysroot`, and CMake 3.30 is unpacked beside it. `source scripts/ubuntu2604/server-env.sh` sets `PATH`, `PKG_CONFIG_PATH`, `CMAKE_PREFIX_PATH`, `LD_LIBRARY_PATH`, `CPATH` and the X/font paths for it (GL is Mesa llvmpipe).
+
+```shell
+scripts/ubuntu2604/server-build.sh [--name NAME] [CTEST_ARG...]   # rsync tree -> ~/work/NAME, build deps + app + tests, ctest
+scripts/ubuntu2604/server-build.sh --name NAME --no-build -R 'CGAL repair'   # only ctest
+scripts/ubuntu2604/server-build.sh --name NAME --cmd 'xvfb-run ...'          # any command in the tree, toolchain sourced
+```
+
+`build/` and `deps/build/` stay on the server under `~/work/NAME` (NAME defaults to the checkout's directory name), so rebuilds are incremental; the log is `~/work/NAME.log`. All runs take `flock ~/build.lock`, so heavy jobs queue instead of overlapping on the 16 cores. Exit codes: 11 build failed, 12 tests failed. For a headless GUI run: `Xvfb :99 -screen 0 1280x800x24 +extension GLX &`, `export DISPLAY=:99`, `openbox &`, then `xdotool`/`wmctrl`/`import -window root x.png` (after `source server-env.sh`).
+
 For a red/green loop, keep one pod with a session instead of a new pod per run (each new pod costs 1–2 minutes of start-up, checkout and provisioning):
 
 ```shell
