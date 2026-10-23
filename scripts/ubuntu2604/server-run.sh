@@ -20,5 +20,6 @@ if [[ $build == 1 ]]; then
     ./build_linux.sh -dstr || exit 11
     cmake --build build --config Release || exit 11
 fi
+args=()
 eval "args=($ctest_args)"
 cd build && ctest -C Release -j1 --output-on-failure --no-tests=error "${args[@]}" || exit 12

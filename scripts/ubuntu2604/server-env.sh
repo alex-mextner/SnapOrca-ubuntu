@@ -131,7 +131,8 @@ server_env_activate() {
     export GCC_EXEC_PREFIX="$p/usr/lib/gcc/"
     export XDG_DATA_DIRS="$p/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
     export XKB_CONFIG_ROOT="$p/usr/share/X11/xkb"
-    export MAGICK_CONFIGURE_PATH="$(echo "$p"/etc/ImageMagick-*):$(echo "$p"/usr/lib/$multi/ImageMagick-*/config-Q16HDRI)"
+    magick_dirs="$(echo "$p"/etc/ImageMagick-*):$(echo "$p"/usr/lib/$multi/ImageMagick-*/config-Q16HDRI)"
+    export MAGICK_CONFIGURE_PATH="$magick_dirs"
     export FONTCONFIG_PATH="$p/etc/fonts" XDG_CONFIG_DIRS="$p/etc/xdg:/etc/xdg"
     export LIBGL_DRIVERS_PATH="$p/usr/lib/$multi/dri"
     ln -sf "$p/usr/bin/xkbcomp" /dev/shm/xkbcomp
