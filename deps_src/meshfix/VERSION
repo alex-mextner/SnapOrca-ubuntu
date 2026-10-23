@@ -1,0 +1,6 @@
+meshfix v0.1.1
+commit 8d44fa3fcb25ee4db4ffe53789fe7b21dbcb19ad
+source https://github.com/alex-mextner/meshfix
+local patch: rejoin_pinched_vertices() after hole filling, and vertex copies that stay separate move along one shared axis
+  (src/cleanup.cpp, src/core.hpp, src/repair.cpp); without it the nudged pinch copies cross each other and the exact
+  CGAL self-intersection check fails ("CGAL repair closes many small holes"). To be upstreamed to meshfix.
