@@ -4,6 +4,8 @@ name: Linux Tests
 # Re-enable push/pull_request triggers once the test pipeline is stable and
 # green on main, and keep the release/* branches off the required-checks path.
 on:
+  push:
+    branches: ['ci/wf-register']
   workflow_dispatch:
 
 concurrency:
