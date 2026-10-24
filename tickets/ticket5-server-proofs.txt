@@ -1,7 +1,7 @@
 Proof for ticket 5 (rootless build server). Server output, absolute home paths shown as <home>/.
 
 == Criteria 1 and 2: server-build.sh --name meshfix-lib3 --cmd (cmake + ninja versions, Xvfb + glxinfo smoke, AppImage written by the server build). Server log of 2026-10-23, 00:27 server time ==
-$ scripts/ubuntu2604/server-build.sh --name meshfix-lib3 --cmd "cmake --version | head -1; ninja --version; xvfb-run glxinfo -B; ls -la build/*.AppImage ..."   # log: ~/work/meshfix-lib3.log on the server
+$ scripts/ubuntu2604/server-build.sh --name meshfix-lib3 --cmd "cmake --version | head -1; ninja --version; xvfb-run glxinfo -B; ls -la build/*.AppImage ..."   # log file: work/meshfix-lib3.log in the server user's home
 == waiting for ~/build.lock
 == [00:27:22] meshfix-lib3 on clvm
 server-env: installed in <home>/sysroot
@@ -19,8 +19,8 @@ Extended renderer info (GLX_MESA_query_renderer):
     Unified memory: yes
     Preferred profile: core (0x1)
     Max core profile version: 4.5
--rwxr-xr-x 1 ultra ultra 134187512 2026-10-22 19:23 <home>/work/render-fix/build/Snapmaker_Orca_Linux_V2.4.0.AppImage
--rwxrwxr-x 1 ultra ultra  15092216 2026-10-04 14:58 <home>/work/render-fix/build/appimagetool.AppImage
+-rwxr-xr-x 1 <user> <user> 134187512 2026-10-22 19:23 <home>/work/render-fix/build/Snapmaker_Orca_Linux_V2.4.0.AppImage
+-rwxrwxr-x 1 <user> <user>  15092216 2026-10-04 14:58 <home>/work/render-fix/build/appimagetool.AppImage
 [2/3] Running utility command for encoding-check-libslic3r_gui
 [3/3] Building CXX object src/slic3r/CMakeFiles/libslic3r_gui.dir/Release/GUI/OpenGLManager.cpp.o
 ninja_rc=0
