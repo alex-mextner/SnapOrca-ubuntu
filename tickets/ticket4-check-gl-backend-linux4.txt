@@ -1,0 +1,20 @@
+Proof for ticket 4, criterion 1: check-gl-backend.sh on the released Ubuntu 26.04 build (release v2.4.0-linux.4, tag commit ebaf6f8681, script unchanged since that commit).
+Static check only: it reads the dynamic symbols of bin/snapmaker-orca inside the AppImage and never starts the app.
+Run on 2026-10-24 on the downloaded release asset.
+
+$ gh release download v2.4.0-linux.4 --repo alex-mextner/SnapOrca-ubuntu -p 'Snapmaker_Orca-v2.4.0-linux.4-x86_64.AppImage'
+$ sha256sum Snapmaker_Orca-v2.4.0-linux.4-x86_64.AppImage
+c7ab2cb83c0faef0b3baffb51f1658caf1b6af4c07a9c13c8008b36f56255ad6  Snapmaker_Orca-v2.4.0-linux.4-x86_64.AppImage
+$ scripts/ubuntu2604/check-gl-backend.sh Snapmaker_Orca-v2.4.0-linux.4-x86_64.AppImage
+PASS Snapmaker_Orca-v2.4.0-linux.4-x86_64.AppImage: 3D canvas built for GLX (15 glX imports, no EGL canvas imports)
+$ echo $?
+0
+
+The sha256 equals the one published in the release manifest (version.json) and the one of the installed file.
+
+Control run on the previous release (linux.3, EGL canvas, the build that showed the blank canvas):
+$ scripts/ubuntu2604/check-gl-backend.sh Snapmaker_Orca.AppImage.linux3.bak
+FAIL Snapmaker_Orca.AppImage.linux3.bak: 3D canvas is not built for GLX (glX imports: 0; EGL canvas imports: eglCreatePlatformWindowSurface,eglGetPlatformDisplay,eglGetProcAddress)
+  rebuild wxWidgets with -DwxUSE_GLCANVAS_EGL=OFF and GLEW with -DGLEW_USE_EGL=OFF (deps/)
+$ echo $?
+1
