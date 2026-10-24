@@ -1,0 +1,37 @@
+Proof for ticket 5 (rootless build server). Server output, absolute home paths shown as <home>/.
+
+== Criteria 1 and 2: server-build.sh --name meshfix-lib3 --cmd (cmake + ninja versions, Xvfb + glxinfo smoke, AppImage written by the server build). Server log of 2026-10-23, 00:27 server time ==
+$ scripts/ubuntu2604/server-build.sh --name meshfix-lib3 --cmd "cmake --version | head -1; ninja --version; xvfb-run glxinfo -B; ls -la build/*.AppImage ..."   # log: ~/work/meshfix-lib3.log on the server
+== waiting for ~/build.lock
+== [00:27:22] meshfix-lib3 on clvm
+server-env: installed in <home>/sysroot
+cmake version 3.30.8
+1.13.2
+name of display: :99
+display: :99  screen: 0
+direct rendering: Yes
+Extended renderer info (GLX_MESA_query_renderer):
+    Vendor: Mesa (0xffffffff)
+    Device: llvmpipe (LLVM 21.1.8, 256 bits) (0xffffffff)
+    Version: 26.0.8
+    Accelerated: no
+    Video memory: 31063MB
+    Unified memory: yes
+    Preferred profile: core (0x1)
+    Max core profile version: 4.5
+-rwxr-xr-x 1 ultra ultra 134187512 2026-10-22 19:23 <home>/work/render-fix/build/Snapmaker_Orca_Linux_V2.4.0.AppImage
+-rwxrwxr-x 1 ultra ultra  15092216 2026-10-04 14:58 <home>/work/render-fix/build/appimagetool.AppImage
+[2/3] Running utility command for encoding-check-libslic3r_gui
+[3/3] Building CXX object src/slic3r/CMakeFiles/libslic3r_gui.dir/Release/GUI/OpenGLManager.cpp.o
+ninja_rc=0
+
+== Criterion 3: ctest slice through the server environment, re-run 2026-10-24 on the build tree meshfix-lib3 (the fix of ticket 7 is in its sources) ==
+$ ctest -C Release -j1 -R "repair|Repair|MeshBoolean|CGAL|Hollow"
+      Start 315: libslic3r:Cancelling the repair of a copy leaves the object unchanged
+54/55 Test #315: libslic3r:Cancelling the repair of a copy leaves the object unchanged ........................................   Passed    0.03 sec
+      Start 367: libslic3r:Hollow two overlapping spheres
+55/55 Test #367: libslic3r:Hollow two overlapping spheres .....................................................................   Passed    5.43 sec
+
+100% tests passed, 0 tests failed out of 55
+
+Total Test time (real) =   9.04 sec
