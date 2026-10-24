@@ -1,0 +1,26 @@
+Proof for ticket 8 (fork worktree cleanup). Outputs re-run on 2026-10-24; the repository root is shown as "." instead of its absolute path.
+
+== Criterion 1: only worktrees with open work remain ==
+$ git worktree list
+.                          ebaf6f8681 [ubuntu-26.04]
+./.worktrees/fixmodel-snap 87dc3e209b [upstream/fix-model-cgal]
+./.worktrees/step-sew      554ee54023 [upstream/step-sew]
+(cache, finalize, localz-manual-patterns, stepimport and pr-assets-fix are not listed. Recorded when the ticket was closed, the main checkout was on branch docs/remote-naming at 43c06575ee; the other two lines are identical.)
+
+== Criterion 2: pull request 1 is resolved ==
+$ gh pr view 1 --repo alex-mextner/SnapOrca-ubuntu
+PR 1 CLOSED https://github.com/alex-mextner/SnapOrca-ubuntu/pull/1 closed 2026-10-22T23:00:06Z: docs: heavy work runs on Runpod
+Closed because it contradicted the server rule in AGENTS.md; superseded by https://github.com/alex-mextner/SnapOrca-ubuntu/pull/10 (merged).
+
+== Criterion 3: upstream drafts still Draft, meshfix landed ==
+$ gh pr view 988 --repo Snapmaker/OrcaSlicer --json url,isDraft,state
+https://github.com/Snapmaker/OrcaSlicer/pull/988 isDraft=true state=OPEN
+$ gh pr view 991 --repo Snapmaker/OrcaSlicer --json url,isDraft,state
+https://github.com/Snapmaker/OrcaSlicer/pull/991 isDraft=true state=OPEN
+$ gh pr view 2 --repo alex-mextner/SnapOrca-ubuntu --json url,state,mergedAt
+https://github.com/alex-mextner/SnapOrca-ubuntu/pull/2 MERGED 2026-10-23T00:26:28Z
+
+== Criterion 4: origin-HEAD problem documented ==
+AGENTS.md "Remotes" bullet, added by commit 43c06575ee "docs: document the origin/upstream remote naming and the worktree guard"
+(pull request https://github.com/alex-mextner/SnapOrca-ubuntu/pull/14, merged as 309860b9a3):
+https://github.com/alex-mextner/SnapOrca-ubuntu/commit/43c06575ee
