@@ -1,0 +1,46 @@
+Proof for ticket 7 (Fix model with the meshfix library).
+
+== Criterion 1: the failing assertion and its cause, as recorded in the commit message of f76fe9254b (the original Catch2 failure output was not kept) ==
+meshfix: rejoin pinched vertices after hole filling, separate the rest along one axis
+
+A vertex where several holes touch was split into one copy per fan, the holes were
+filled per loop, and the copies were nudged apart along their own normals. Around a
+sphere pole this made the nudged copies' faces cross, so the exact CGAL
+does_self_intersect() check failed on "CGAL repair closes many small holes"
+(580 intersecting pairs, all between faces made of nudged pole copies).
+
+rejoin_pinched_vertices() merges the copies back where the faces then form one closed
+fan, dropping the collapsed faces; the pole case needs no nudge at all (0 pairs, volume
+exact). Copies that must stay apart move along their common normal axis in growing
+steps (golden-angle sideways offset so a triangle of copies keeps an area) and keep
+the old per-normal nudge when the normals cancel (parts touching from opposite sides).
+
+
+== Criterion 2: the repaired test and the repair/MeshBoolean slice on the build server, re-run 2026-10-24 on the build tree meshfix-lib3 (its sources contain rejoin_pinched_vertices from f76fe9254b) ==
+$ ctest -C Release -R "CGAL repair closes many small holes" -V
+269: Test timeout computed to be: 10000000
+269: Filters: "CGAL repair closes many small holes"
+269: Randomness seeded to: 387950976
+269: ===============================================================================
+269: All tests passed (5 assertions in 1 test case)
+269: 
+1/1 Test #269: libslic3r:CGAL repair closes many small holes ...   Passed    0.78 sec
+
+The following tests passed:
+	libslic3r:CGAL repair closes many small holes
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   0.80 sec
+
+$ ctest -C Release -j1 -R "repair|Repair|MeshBoolean|CGAL|Hollow"
+      Start 315: libslic3r:Cancelling the repair of a copy leaves the object unchanged
+54/55 Test #315: libslic3r:Cancelling the repair of a copy leaves the object unchanged ........................................   Passed    0.03 sec
+      Start 367: libslic3r:Hollow two overlapping spheres
+55/55 Test #367: libslic3r:Hollow two overlapping spheres .....................................................................   Passed    5.43 sec
+
+100% tests passed, 0 tests failed out of 55
+
+Total Test time (real) =   9.04 sec
+
+The slice selects 55 tests; the ticket text said 56 because it counted a differently selected slice.
