@@ -1346,14 +1346,36 @@ int PartPlate::picking_id_component(int idx) const
 }
 
 
-static void expand_plate_extruders(std::vector<int>& ids)
+// Replaces the ids of virtual (mixed) filaments by the physical filaments they are made of.
+static void expand_plate_extruders(std::vector<int>& ids, const MixedFilamentManager& mixed_filaments, size_t num_physical)
 {
-	const size_t num_physical = static_cast<size_t>(std::max(wxGetApp().filaments_cnt(), 0));
 	if (num_physical > 0) {
-		wxGetApp().preset_bundle->mixed_filaments.expand_virtual_extruder_ids(ids, num_physical);
+		mixed_filaments.expand_virtual_extruder_ids(ids, num_physical);
 		std::sort(ids.begin(), ids.end());
 		ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
 	}
+}
+
+// GUI only: the mixed filaments and the filament count live in the application's preset bundle.
+static void expand_plate_extruders(std::vector<int>& ids)
+{
+	const size_t num_physical = static_cast<size_t>(std::max(wxGetApp().filaments_cnt(), 0));
+	expand_plate_extruders(ids, wxGetApp().preset_bundle->mixed_filaments, num_physical);
+}
+
+// The command line slicer has no GUI_App and no preset bundle, only the full print config of the project; this
+// builds the mixed filaments from it the way Print::apply() does.
+static void expand_plate_extruders(std::vector<int>& ids, const DynamicPrintConfig& full_config)
+{
+	const ConfigOptionStrings* colours_option = full_config.option<ConfigOptionStrings>("filament_colour");
+	if (colours_option == nullptr)
+		return;
+	const std::vector<std::string>& colours = colours_option->values;
+	MixedFilamentManager mixed_filaments;
+	mixed_filaments.auto_generate(colours);
+	if (full_config.has("mixed_filament_definitions"))
+		mixed_filaments.load_custom_entries(full_config.opt_string("mixed_filament_definitions"), colours);
+	expand_plate_extruders(ids, mixed_filaments, colours.size());
 }
 std::vector<int> PartPlate::get_extruders(bool conside_custom_gcode) const
 {
@@ -1600,7 +1622,7 @@ std::vector<int> PartPlate::get_extruders_under_cli(bool conside_custom_gcode, D
     std::sort(plate_extruders.begin(), plate_extruders.end());
     auto it_end = std::unique(plate_extruders.begin(), plate_extruders.end());
     plate_extruders.resize(std::distance(plate_extruders.begin(), it_end));
-    expand_plate_extruders(plate_extruders);
+    expand_plate_extruders(plate_extruders, full_config);
     std::ostringstream extruders_list;
     for (size_t i = 0; i < plate_extruders.size(); ++i) {
         if (i != 0)
@@ -1913,6 +1935,10 @@ Vec3d PartPlate::get_center_origin()
 
 void PartPlate::generate_plate_name_texture()
 {
+    // The texture and the picking raycasters belong to the 3D canvas of the GUI; the command line slicer has no Plater.
+    if (m_partplate_list == nullptr || m_partplate_list->m_plater == nullptr)
+        return;
+
     m_plate_name_icon.reset();
 
 	// generate m_name_texture texture from m_name with generate_from_text_string

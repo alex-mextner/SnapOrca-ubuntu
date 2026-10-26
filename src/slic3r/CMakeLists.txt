@@ -749,6 +749,11 @@ encoding_check(libslic3r_gui)
 
 find_package(libnoise REQUIRED)
 target_link_libraries(libslic3r_gui libslic3r cereal::cereal imgui imguizmo minilzo GLEW::GLEW OpenGL::GL hidapi ${wxWidgets_LIBRARIES} glfw libcurl OpenSSL::SSL OpenSSL::Crypto noise::noise)
+# The public headers of libslic3r_gui (PartPlate.hpp, Plater.hpp, ...) include wx headers: hand the include paths and
+# definitions of wxWidgets to the consumers outside src/ (tests/slic3rutils), which the directory-scope
+# include(wxWidgets_USE_FILE) of src/CMakeLists.txt does not reach.
+target_include_directories(libslic3r_gui SYSTEM PUBLIC ${wxWidgets_INCLUDE_DIRS})
+target_compile_definitions(libslic3r_gui PUBLIC ${wxWidgets_DEFINITIONS})
 
 if (MSVC)
     target_link_libraries(libslic3r_gui Setupapi.lib)
