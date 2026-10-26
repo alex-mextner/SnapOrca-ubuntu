@@ -17,6 +17,7 @@
 
 // Print now includes tbb, and tbb includes Windows. This breaks compilation of wxWidgets if included before wx.
 #include "libslic3r/Print.hpp"
+#include "libslic3r/CrashDiagnostics.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/GCode/PostProcessor.hpp"
@@ -447,7 +448,7 @@ void BackgroundSlicingProcess::call_process(std::exception_ptr &ex) throw()
 		BOOST_LOG_TRIVIAL(error) <<__FUNCTION__ << ":got cancelled exception" << std::endl;
 	} catch (...) {
 		ex = std::current_exception();
-		BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":got other exception" << std::endl;
+		log_current_exception(__FUNCTION__);
 	}
 }
 

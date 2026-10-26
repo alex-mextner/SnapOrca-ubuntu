@@ -95,6 +95,8 @@ set(lisbslic3r_sources
     Color.hpp
     Config.cpp
     Config.hpp
+    CrashDiagnostics.cpp
+    CrashDiagnostics.hpp
     CustomGCode.cpp
     CustomGCode.hpp
     CutUtils.cpp
