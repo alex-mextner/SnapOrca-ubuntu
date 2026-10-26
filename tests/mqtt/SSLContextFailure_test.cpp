@@ -49,13 +49,14 @@ struct ChildResult
 };
 
 // Runs in the forked child: connect an mqtts:// client to a local listener under a broken OpenSSL.
-[[noreturn]] void run_connect_with_broken_openssl(const std::string& conf_path, int report_fd)
+[[noreturn]] void run_connect(const std::string& conf_path, const std::string& trust_store, int report_fd)
 {
     // Catch2's crash handlers are inherited from the runner; the default action keeps the
     // child's death a plain signal that the parent can read from the wait status.
     for (const int sig : {SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL})
         signal(sig, SIG_DFL);
-    setenv("OPENSSL_CONF", conf_path.c_str(), 1);
+    if (!conf_path.empty())
+        setenv("OPENSSL_CONF", conf_path.c_str(), 1);
 
     // A plain listening socket is enough: the kernel completes the TCP handshake from the
     // backlog, and paho goes on to set up TLS on the connected socket.
@@ -74,6 +75,8 @@ struct ChildResult
     ssl.set_verify(false);
     ssl.set_enable_server_cert_auth(true);
     ssl.set_ssl_version(MQTT_SSL_VERSION_TLS_1_2);
+    if (!trust_store.empty())
+        ssl.set_trust_store(trust_store);
     ssl.set_error_handler([report_fd](const std::string& msg) {
         const std::string line = msg + "\n";
         if (write(report_fd, line.data(), line.size()) < 0)
@@ -99,7 +102,7 @@ struct ChildResult
     }
 }
 
-ChildResult run_in_child(const std::string& conf_path)
+ChildResult run_in_child(const std::string& conf_path, const std::string& trust_store)
 {
     int fds[2];
     REQUIRE(pipe(fds) == 0);
@@ -108,7 +111,7 @@ ChildResult run_in_child(const std::string& conf_path)
     REQUIRE(pid >= 0);
     if (pid == 0) {
         close(fds[0]);
-        run_connect_with_broken_openssl(conf_path, fds[1]);
+        run_connect(conf_path, trust_store, fds[1]);
     }
     close(fds[1]);
 
@@ -155,7 +158,7 @@ TEST_CASE("mqtts connect survives SSL_CTX_new() failing", "[MQTT][SSL]")
         REQUIRE(conf.good());
     }
 
-    const ChildResult result = run_in_child(conf_path);
+    const ChildResult result = run_in_child(conf_path, "");
     std::remove(conf_path.c_str());
     rmdir(dir.c_str());
 
@@ -166,4 +169,23 @@ TEST_CASE("mqtts connect survives SSL_CTX_new() failing", "[MQTT][SSL]")
     CHECK(result.exit_code == ConnectFailedCleanly);
     // The error queue text must reach the application's callback so it can be logged.
     CHECK_THAT(result.ssl_errors, Catch::Matchers::ContainsSubstring("SSL_CTX_new"));
+}
+
+// A context that fails after SSL_CTX_new() (the trust store cannot be read) queues several OpenSSL
+// errors. All of them must reach the application's handler: the C++ wrapper's callback has to return a
+// positive value, because ERR_print_errors_cb() stops reporting at the first result <= 0.
+TEST_CASE("mqtts connect reports every OpenSSL error of a failing trust store", "[MQTT][SSL]")
+{
+    const ChildResult result = run_in_child("", "/nonexistent/ssl-ctx-failure-test-ca.pem");
+
+    INFO("terminating signal: " << result.term_signal);
+    INFO("OpenSSL errors reported: " << result.ssl_errors);
+    REQUIRE(result.term_signal == 0);
+    REQUIRE(result.exited);
+    CHECK(result.exit_code == ConnectFailedCleanly);
+    // Each report reads "<thread>:error:<code>:<library>:<function>:<reason>".
+    size_t reported_errors = 0;
+    for (size_t pos = result.ssl_errors.find(":error:"); pos != std::string::npos; pos = result.ssl_errors.find(":error:", pos + 1))
+        ++reported_errors;
+    CHECK(reported_errors >= 2);
 }

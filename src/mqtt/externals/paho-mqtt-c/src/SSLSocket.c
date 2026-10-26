@@ -115,8 +115,10 @@ static int SSLSocket_error(char* aString, SSL* ssl, SOCKET sock, int rc, int (*c
         	Log(TRACE_MIN, -1, "SSLSocket error %s(%d) in %s for socket %d rc %d errno %d %s\n", buf, error, aString, sock, rc, errno, strerror(errno));
         if (cb)
             ERR_print_errors_cb(cb, u);
-        else if (!ssl)
-            ERR_clear_error(); /* nobody reads the queue, do not leave the entry behind */
+        /* ERR_print_errors_cb() stops at a callback result <= 0 and leaves the rest queued, and without a
+           callback nothing reads them: a leftover entry makes a later SSL_get_error() on this thread report
+           SSL_ERROR_SSL for a healthy handshake */
+        ERR_clear_error();
 		if (error == SSL_ERROR_SSL || error == SSL_ERROR_SYSCALL)
 			error = SSL_FATAL;
     }
