@@ -368,24 +368,16 @@ if [ -z "\$SSL_CERT_FILE" ] && [ -r /etc/ssl/certs/ca-certificates.crt ]; then
     export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 fi
 
-if [ "\$XDG_SESSION_TYPE" = "wayland" ] && [ "\$ZINK_DISABLE_OVERRIDE" != "1" ]; then
-    if command -v glxinfo >/dev/null 2>&1; then
-        RENDERER=\$(glxinfo | grep "OpenGL renderer string:" | sed 's/.*: //')
-        if echo "\$RENDERER" | grep -qi "NVIDIA"; then
-            if command -v nvidia-smi >/dev/null 2>&1; then
-                DRIVER_VERSION=\$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1)
-                DRIVER_MAJOR=\$(echo "\$DRIVER_VERSION" | cut -d. -f1)
-                [ "\$DRIVER_MAJOR" -gt 555 ] && ZINK_FORCE_OVERRIDE=1
-            fi
-            if [ "\$ZINK_FORCE_OVERRIDE" = "1" ]; then
-                export __GLX_VENDOR_LIBRARY_NAME=mesa
-                export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
-                export MESA_LOADER_DRIVER_OVERRIDE=zink
-                export GALLIUM_DRIVER=zink
-                export WEBKIT_DISABLE_DMABUF_RENDERER=1
-            fi
-        fi
-    fi
+# Zink (OpenGL over Vulkan) is opt-in: ZINK_FORCE_OVERRIDE=1 in a Wayland session. It used to be forced
+# for NVIDIA drivers newer than 555 because the 3D canvas was an EGL canvas that stays blank on NVIDIA's
+# EGL; the canvas is a GLX canvas on XWayland now (GDK_BACKEND=x11), which NVIDIA's own GLX draws, and the
+# forced Zink moved WebKit's EGL to Mesa as well.
+if [ "\$XDG_SESSION_TYPE" = "wayland" ] && [ "\$ZINK_FORCE_OVERRIDE" = "1" ]; then
+    export __GLX_VENDOR_LIBRARY_NAME=mesa
+    export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+    export MESA_LOADER_DRIVER_OVERRIDE=zink
+    export GALLIUM_DRIVER=zink
+    export WEBKIT_DISABLE_DMABUF_RENDERER=1
 fi
 exec "\$DIR/libexec/@SLIC3R_APP_CMD@-env" "\$DIR/bin/@SLIC3R_APP_CMD@" "\$@"
 EOF

@@ -9,6 +9,7 @@ add_executable(${_TEST_NAME}_tests
     ${_TEST_NAME}_tests_main.cpp
     SnapLogClient_test.cpp
     PartPlateCli_test.cpp
+    PresetUpdaterStaging_test.cpp
     )
 
 find_package(JPEG REQUIRED)
