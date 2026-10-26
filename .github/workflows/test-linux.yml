@@ -1,9 +1,12 @@
 name: Linux Tests
 
-# Disabled by default: only manual trigger (Actions tab -> Run workflow).
-# Re-enable push/pull_request triggers once the test pipeline is stable and
-# green on main, and keep the release/* branches off the required-checks path.
+# Runs on pull requests to the fork's Ubuntu 26.04 branch (a dispatched run is not listed in the
+# pull request checks, so gh ship would see no check) and on manual trigger (Actions tab -> Run workflow).
+# Only Ubuntu 24.04: the fork targets Ubuntu 26.04 and one hosted build takes about 90 minutes cold.
 on:
+  pull_request:
+    branches:
+      - ubuntu-26.04
   workflow_dispatch:
 
 concurrency:
@@ -18,7 +21,6 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-22.04
           - ubuntu-24.04
 
     steps:
@@ -199,7 +201,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Generate HTML report
-        if: always()
+        if: always() && steps.filter.outputs.filter != '__SKIP__'
         shell: bash
         run: node scripts/junit-to-html.js build/test-results.xml -t "OrcaSlicer Linux Tests" -o build/test-report.html
 
