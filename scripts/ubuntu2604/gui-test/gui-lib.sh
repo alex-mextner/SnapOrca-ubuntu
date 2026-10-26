@@ -93,7 +93,8 @@ close_window() {
 }
 
 # close_wizard SHOT_PREFIX [SECONDS]: the setup wizard opens on every start with a fresh datadir
-# (it is never completed); the update check runs after it is closed.
+# (it is never completed); the update check runs after it is closed. Returns non-zero when the
+# window never appeared or is still open after the close request.
 close_wizard() {
     local wid
     if ! wid=$(wait_win '^Setup Wizard' "${2:-180}"); then
@@ -102,7 +103,10 @@ close_wizard() {
     fi
     sleep 2 # let the wizard's web view settle before closing it
     shot "$1-wizard"
-    close_window "$wid" "Setup Wizard" || log "Setup Wizard did not close"
+    close_window "$wid" "Setup Wizard" || {
+        log "Setup Wizard did not close"
+        return 1
+    }
 }
 
 # close_main: close the main window (titled after the open project, "*Untitled" when empty).

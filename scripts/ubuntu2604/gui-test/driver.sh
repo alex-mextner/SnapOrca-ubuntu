@@ -37,7 +37,7 @@ log "variant=$VARIANT ro=${SO_RO:-0} app=$APP runner=$RUNNER"
 
 fail() { log "FLOW: $*"; shot zz-flow-failed; exit 1; }
 
-close_wizard 01 || fail "first instance: setup wizard not seen"
+close_wizard 01 || fail "first instance: setup wizard not seen or did not close"
 
 if [ "$VARIANT" = force ]; then
     title='needs an (upgrade|update)'
@@ -90,7 +90,7 @@ log "first instance exited"
 
 if [ "$VARIANT" = normal ] && [ "${SO_RO:-0}" != 1 ]; then
     wait_line "$EVENTS" 'relaunch_cmd=' 60 || fail "no relaunched instance"
-    close_wizard 06 || fail "relaunched instance: setup wizard not seen"
+    close_wizard 06 || fail "relaunched instance: setup wizard not seen or did not close"
     close_main 07 || fail "relaunched main window not closed"
 fi
 
