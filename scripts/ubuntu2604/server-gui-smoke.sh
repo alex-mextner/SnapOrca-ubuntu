@@ -95,7 +95,7 @@ APPDIR=$ROOT "$ROOT/AppRun" --datadir "$W/data" >"$W/app.log" 2>&1 &
 RUNNER=$!
 log "app=$APP pid=$RUNNER display=$GUI_DISPLAY"
 
-close_wizard 01 240 || fail "no setup wizard window (the app exited or hung; see $W/app.log and $W/data/log)"
+close_wizard 01 240 || fail "no setup wizard window, or it did not close (the app exited or hung; see $W/app.log and $W/data/log)"
 wid=$(wait_win 'Untitled' 120) || fail "main window did not appear (see $W/app.log)"
 log "main window $wid"
 sleep 3 # let the home page settle
