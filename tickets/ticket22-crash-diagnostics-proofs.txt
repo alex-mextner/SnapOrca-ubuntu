@@ -1,0 +1,98 @@
+Ticket 22 proofs. Build server run, branch feat/crash-diagnostics (ubuntu-26.04 at 2ffc8c4fc3 + commit fdc430208d), Release build of the Snapmaker_Orca and libslic3r_tests targets.
+
+## Criteria 1, 3, 4: Catch2 tests that fork a child, install the handlers, fault and die; the parent reads the log file
+
+Mem:              30           7          19           2           7          23
+BUILD_RC=0 (tree = branch feat/crash-diagnostics: ubuntu-26.04 at 2ffc8c4fc3 plus the crash diagnostics commit)
+== libslic3r_tests [CrashDiagnostics]
+1.096 s: std::terminate with an active exception reports its type and what() once
+1.098 s: std::terminate without an active exception is reported
+1.100 s: a handler installed earlier still runs after the report
+8.093 s: a slow previous handler does not get the process SIGKILLed during the default action
+1.104 s: two threads faulting together leave one complete report
+0.002 s: records of the boost log sink do not overwrite what another descriptor appended to the file
+0.002 s: installing the handlers writes nothing and does not change a normal exit
+1.104 s: the report starts on its own line when the log ends in the middle of a record
+1.102 s: the report lands in the file of the application's boost log sink, after its records
+===============================================================================
+All tests passed (161 assertions in 15 test cases)
+
+Test cases (tests/libslic3r/test_crash_diagnostics.cpp), tag [CrashDiagnostics]:
+  - log_current_exception logs the type and what() of a std::exception at error level
+  - log_current_exception names the dynamic type of a derived exception
+  - log_current_exception reports an exception that is not a std::exception
+  - fatal signals leave signal, thread and backtrace in the log and keep the default exit status
+  - a hardware fault reports the faulting address
+  - a fault in a library thread names that thread
+  - std::terminate with an active exception reports its type and what() once
+  - std::terminate without an active exception is reported
+  - a handler installed earlier still runs after the report
+  - a slow previous handler does not get the process SIGKILLed during the default action
+  - two threads faulting together leave one complete report
+  - records of the boost log sink do not overwrite what another descriptor appended to the file
+  - installing the handlers writes nothing and does not change a normal exit
+  - the report starts on its own line when the log ends in the middle of a record
+  - the report lands in the file of the application's boost log sink, after its records
+
+## Criterion 2: real fatal signal on the GUI binary (headless Xvfb on the build server, kill -SEGV once the main window exists)
+
+
+== real run: snapmaker-orca GUI binary built from this tree, SIGSEGV sent after the main window appeared
+exit status 139 (139 = killed by SIGSEGV)
+21706-[info]	2026-10-27 06:08:13.172738[Thread 0x00007f20823f96c0]:GetFilamentInfo~/work/crash-diag/build/src/resources/profiles/Tiertime/filament/fdm_filament_pc.json - Not Contains filament_vendor
+21707-[info]	2026-10-27 06:08:13.172739[Thread 0x00007f20905fe6c0]:GetFilamentInfo Before Format Inherits Path: VendorDirectory - ~/work/crash-diag/build/src/resources/profiles/Tiertime, sub_path - filament/fdm_filament_common.json
+21708:[fatal]	2026-10-27 06:08:21 UTC[Thread tid 1918406 "snapmaker-orca"]:fatal signal 11 (SIGSEGV), no fault address (raised by pid 1918366)
+[fatal]	2026-10-27 06:08:21 UTC[Thread tid 1918406 "snapmaker-orca"]:fatal signal 11 (SIGSEGV), no fault address (raised by pid 1918366)
+[fatal]	backtrace of the crashing thread, innermost frame first (the first frames belong to the crash handler):
+snapmaker-orca(+0x2d6c33b) [0x5ec52b5ea33b]
+snapmaker-orca(+0x2d6e554) [0x5ec52b5ec554]
+libjavascriptcoregtk-4.1.so.0(+0x1962137) [0x7f22f7962137]
+libc.so.6(+0x45cb0) [0x7f22f5c45cb0]
+libc.so.6(+0xac802) [0x7f22f5cac802]
+libc.so.6(+0xa039c) [0x7f22f5ca039c]
+libc.so.6(ppoll+0x46) [0x7f22f5d28136]
+libglib-2.0.so.0(+0x62371) [0x7f22fde6e371]
+libglib-2.0.so.0(g_main_loop_run+0x137) [0x7f22fde6e5f7]
+libgtk-3.so.0(gtk_main+0x85) [0x7f22fe60fc05]
+snapmaker-orca(+0x51ebf45) [0x5ec52da69f45]
+snapmaker-orca(+0x531d281) [0x5ec52db9b281]
+snapmaker-orca(+0x5247ff3) [0x5ec52dac5ff3]
+snapmaker-orca(+0x2280b9a) [0x5ec52aafeb9a]
+snapmaker-orca(+0x1c6d92c) [0x5ec52a4eb92c]
+snapmaker-orca(+0x1c6e1a6) [0x5ec52a4ec1a6]
+snapmaker-orca(+0x1c6e36d) [0x5ec52a4ec36d]
+snapmaker-orca(+0x53da9f0) [0x5ec52dc589f0]
+snapmaker-orca(+0x53daa3e) [0x5ec52dc58a3e]
+snapmaker-orca(+0x53daae9) [0x5ec52dc58ae9]
+snapmaker-orca(+0x53da2b3) [0x5ec52dc582b3]
+snapmaker-orca(+0x52e7857) [0x5ec52db65857]
+snapmaker-orca(+0x51dba02) [0x5ec52da59a02]
+snapmaker-orca(+0x51dbaf7) [0x5ec52da59af7]
+libglib-2.0.so.0(+0x60c1b) [0x7f22fde6cc1b]
+libglib-2.0.so.0(+0x62257) [0x7f22fde6e257]
+libglib-2.0.so.0(g_main_loop_run+0x137) [0x7f22fde6e5f7]
+libgtk-3.so.0(gtk_main+0x85) [0x7f22fe60fc05]
+snapmaker-orca(+0x51ebf45) [0x5ec52da69f45]
+snapmaker-orca(+0x531d281) [0x5ec52db9b281]
+snapmaker-orca(+0x52e8222) [0x5ec52db66222]
+snapmaker-orca(+0x53705b8) [0x5ec52dbee5b8]
+snapmaker-orca(+0x1c8f140) [0x5ec52a50d140]
+snapmaker-orca(+0xf5383f) [0x5ec5297d183f]
+snapmaker-orca(+0xd85a9f) [0x5ec529603a9f]
+libc.so.6(+0x2a601) [0x7f22f5c2a601]
+libc.so.6(__libc_start_main+0x88) [0x7f22f5c2a718]
+snapmaker-orca(+0xf21945) [0x5ec52979f945]
+[fatal]	end of crash report; the process now terminates with the default action
+
+## Criterion 3: Linux-only, chained, installed once
+
+11:#if defined(__linux__)
+46:#if defined(__linux__)
+425:#else // __linux__
+431:#endif // __linux__
+319:        if (previous.sa_handler != SIG_DFL && previous.sa_handler != SIG_IGN) {
+321:                previous.sa_sigaction(sig, info, context);
+323:                previous.sa_handler(sig);
+360:        g_previous_terminate();
+413:        if (::sigaction(k_fatal_signals[i], &action, &g_previous_actions[i]) != 0) {
+421:    g_previous_terminate = std::set_terminate(&terminate_handler);
