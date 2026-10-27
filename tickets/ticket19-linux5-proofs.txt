@@ -23,7 +23,7 @@ Screenshots of the Preview tab after each slice (toolpaths drawn, "Slice complet
   .../ticket19-linux5-xvfb-slice-2-preview.png  .../ticket19-linux5-xvfb-slice-3-preview.png  .../ticket19-linux5-xvfb-slice-4-preview.png  .../ticket19-linux5-xvfb-slice-5-preview.png
 
 ## Cause found for the slicing failures
-AddressSanitizer on the real project (before PR 29): stack-use-after-scope in WipeTowerIntegration::append_tcr2 (src/libslic3r/GCode/..., Eigen expression kept by 'auto' over a dead temporary), stack
+AddressSanitizer on the real project (before PR 29): stack-use-after-scope in WipeTowerIntegration::append_tcr2 (src/libslic3r/GCode.cpp, Eigen expression kept by 'auto' over a dead temporary), stack
   READ of size 4 ... #0 Eigen::internal::scalar_sum_op<float, float>::operator() #4 Slic3r::WipeTowerIntegration::append_tcr2 #5 WipeTowerIntegration::tool_change #6 GCode::process_layer #16 GCode::process_layers (tbb::parallel_pipeline) #17 GCode::_do_export #20 BackgroundSlicingProcess::process_fff
 Fixed in PR 29 (evaluated Vec2f); the same project then sliced twice under ASAN without a report, and now 10 times (above) without a crash or exception.
 NOT reproduced: the 'double free or corruption (out)' abort of run A. A read cannot corrupt the heap, so the append_tcr2 defect does not by itself explain it. Since this release a crash writes signal, address, thread and backtrace to the app log, and a slicing exception writes its type and message (issue 22).
