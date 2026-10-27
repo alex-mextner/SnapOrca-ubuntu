@@ -138,6 +138,9 @@ jobs:
               - tests/slic3rutils/**
             test_libnest2d:
               - tests/libnest2d/**
+            test_mqtt:
+              - tests/mqtt/**
+              - src/mqtt/**
             ci_config:
               - .github/workflows/**
 
@@ -174,6 +177,10 @@ jobs:
           fi
           if [ "${{ steps.changed.outputs.test_libnest2d_any_changed }}" = 'true' ]; then
             echo "filter=libnest2d" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${{ steps.changed.outputs.test_mqtt_any_changed }}" = 'true' ]; then
+            echo "filter=mqtt" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "filter=__SKIP__" >> "$GITHUB_OUTPUT"
