@@ -35,8 +35,9 @@ assert gcode.count(";LAYER_CHANGE") > 10 and "printer_model = Snapmaker U1" in g
 EOF
 
 # A project 3mf with a named plate and a mixed (virtual) filament: the two things that made the command line
-# slicer dereference GUI state that does not exist there (issue #21). The project carries its own settings.
-"$appimage" --appimage-extract-and-run --datadir "$smoke/project-data" --slice 0 --outputdir "$smoke/project-out" \
+# slicer dereference GUI state that does not exist there (issue #21). The project carries its own settings and was
+# saved by the 2.4.0 GUI, whose version the command line slicer (01.10.01.50) refuses without --allow-newer-file.
+"$appimage" --appimage-extract-and-run --datadir "$smoke/project-data" --allow-newer-file --slice 0 --outputdir "$smoke/project-out" \
     tests/data/test_3mf/mixed_named_plate.3mf >"$smoke/project-slice.log" 2>&1 || { echo "project smoke slice crashed, see $smoke/project-slice.log" >&2; exit 13; }
 python3 - "$smoke/project-out" <<'EOF' || { echo "project smoke slice produced no valid G-code, see $smoke" >&2; exit 13; }
 import json, pathlib, sys
