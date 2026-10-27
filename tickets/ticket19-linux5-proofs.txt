@@ -1,0 +1,29 @@
+Ticket 19 proofs, release v2.4.0-linux.5 (AppImage sha256 5369d16b8ae6c41a04567c4c29d707f6f44f2744203e8426a7fb47be191758e7).
+
+## Install
+The release asset downloaded from GitHub and the installed launcher file have the same sha256:
+  release asset  5369d16b8ae6c41a04567c4c29d707f6f44f2744203e8426a7fb47be191758e7
+  installed file 5369d16b8ae6c41a04567c4c29d707f6f44f2744203e8426a7fb47be191758e7  (Applications/Snapmaker_Orca.AppImage, replaced by one atomic rename; the previous file is kept as Snapmaker_Orca.AppImage.linux4.bak, sha256 c7ab2cb83c0faef0b3baffb51f1658caf1b6af4c07a9c13c8008b36f56255ad6)
+  check-gl-backend.sh on the installed file: PASS: 3D canvas built for GLX (15 glX imports, no EGL canvas imports)
+
+## 5 slices through the launcher path (installed AppImage mounted by the runtime, its own AppRun, session environment, bubblewrap without USB/HID, copy of the real config), one at a time
+Project: the user's recent project chekhov_phone_stand.3mf, sha256 f6a9c4563e04d4280a10bb87b23fe388622b5e06e0efb8f8a6f0eb412bab2094
+The desktop session is locked (GNOME screensaver active, idle 12 h), so Mutter's ScreenCast and RemoteDesktop refuse to create a session: the GUI could not be clicked or captured on the real desktop. These five slices therefore used the command line slicer through the same AppRun path.
+launcher-path slice 1: rc=0 secs=51 "return_code": 0 gcode_bytes=126558336 layers=1115 abort_lines=0
+launcher-path slice 2: rc=0 secs=51 "return_code": 0 gcode_bytes=126558336 layers=1115 abort_lines=0
+launcher-path slice 3: rc=0 secs=50 "return_code": 0 gcode_bytes=126558336 layers=1115 abort_lines=0
+launcher-path slice 4: rc=0 secs=51 "return_code": 0 gcode_bytes=126558336 layers=1115 abort_lines=0
+launcher-path slice 5: rc=0 secs=51 "return_code": 0 gcode_bytes=126558336 layers=1115 abort_lines=0
+kernel log lines about snapmaker segfaults since 09:00: 0
+
+## 5 GUI slices of the same project with the same AppImage on a private Xvfb (build server), Slice plate clicked once the project loaded
+r5-1 .. r5-5: each log has exactly one 'send SlicingProcessCompletedEvent', 0 'got other exception', no double free in the app output; the only [fatal]-level line in each log is the sign-in page load (id.snapmaker.com unreachable), not a crash.
+Screenshots of the Preview tab after each slice (toolpaths drawn, "Slice complete"):
+  https://raw.githubusercontent.com/alex-mextner/SnapOrca-ubuntu/pr-assets/tickets/ticket19-linux5-xvfb-slice-1-preview.png
+  .../ticket19-linux5-xvfb-slice-2-preview.png  .../ticket19-linux5-xvfb-slice-3-preview.png  .../ticket19-linux5-xvfb-slice-4-preview.png  .../ticket19-linux5-xvfb-slice-5-preview.png
+
+## Cause found for the slicing failures
+AddressSanitizer on the real project (before PR 29): stack-use-after-scope in WipeTowerIntegration::append_tcr2 (src/libslic3r/GCode/..., Eigen expression kept by 'auto' over a dead temporary), stack
+  READ of size 4 ... #0 Eigen::internal::scalar_sum_op<float, float>::operator() #4 Slic3r::WipeTowerIntegration::append_tcr2 #5 WipeTowerIntegration::tool_change #6 GCode::process_layer #16 GCode::process_layers (tbb::parallel_pipeline) #17 GCode::_do_export #20 BackgroundSlicingProcess::process_fff
+Fixed in PR 29 (evaluated Vec2f); the same project then sliced twice under ASAN without a report, and now 10 times (above) without a crash or exception.
+NOT reproduced: the 'double free or corruption (out)' abort of run A. A read cannot corrupt the heap, so the append_tcr2 defect does not by itself explain it. Since this release a crash writes signal, address, thread and backtrace to the app log, and a slicing exception writes its type and message (issue 22).
