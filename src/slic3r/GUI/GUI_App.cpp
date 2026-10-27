@@ -77,6 +77,7 @@
 #include <openssl/evp.h>
 
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/CrashDiagnostics.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/I18N.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -2240,6 +2241,8 @@ void GUI_App::init_app_config()
 #else
     set_log_path_and_level(log_filename, 3);
 #endif
+    // Right after the log file exists, so that a later crash leaves its cause in that file.
+    install_crash_log_handlers(current_log_file_path());
 
     //BBS: remove GCodeViewer as seperate APP logic
 	if (!app_config)
