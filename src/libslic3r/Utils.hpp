@@ -174,6 +174,10 @@ void set_log_path_and_level(const std::string& file, unsigned int level);
  */
 void flush_logs();
 
+// First file of the boost log sink set up by set_log_path_and_level(); empty before that call.
+// Crash diagnostics append their report there through their own descriptor.
+const std::string& current_log_file_path();
+
 // A special type for strings encoded in the local Windows 8-bit code page.
 // This type is only needed for Perl bindings to relay to Perl that the string is raw, not UTF-8 encoded.
 typedef std::string local_encoded_string;

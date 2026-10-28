@@ -24,6 +24,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/AMSSetting.hpp
     GUI/AmsWidgets.cpp
     GUI/AmsWidgets.hpp
+    GUI/AppImageUpdater.cpp
+    GUI/AppImageUpdater.hpp
     GUI/Auxiliary.cpp
     GUI/AuxiliaryDataViewModel.cpp
     GUI/AuxiliaryDataViewModel.hpp
@@ -611,8 +613,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/FileHelp.hpp
     Utils/FileDecrypt.cpp
     Utils/FileDecrypt.hpp
-    Utils/FixModelByWin10.cpp
-    Utils/FixModelByWin10.hpp
+    Utils/FixModelByCgal.cpp
+    Utils/FixModelByCgal.hpp
     Utils/FlashAir.cpp
     Utils/FlashAir.hpp
     Utils/Flashforge.cpp
@@ -738,6 +740,16 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/GeneratedConfig.hpp.in
                ${CMAKE_CURRENT_BINARY_DIR}/GeneratedConfig.hpp
                @ONLY)
 
+# The commit hash goes into a header that only GUI_App.cpp includes, rewritten only when it
+# changes: as a compile definition it would alter every compile command (and the precompiled
+# headers) on each commit and defeat compiler caches across commits.
+if (NOT GIT_COMMIT_HASH)
+    set(GIT_COMMIT_HASH "0000000") # unknown
+endif ()
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/GitCommitHash.hpp.in
+               ${CMAKE_CURRENT_BINARY_DIR}/GitCommitHash.hpp
+               @ONLY)
+
 add_library(libslic3r_gui STATIC ${SLIC3R_GUI_SOURCES})
 target_include_directories(libslic3r_gui PRIVATE Utils ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(libslic3r_gui paho-mqttpp3-static)
@@ -757,6 +769,11 @@ encoding_check(libslic3r_gui)
 
 find_package(libnoise REQUIRED)
 target_link_libraries(libslic3r_gui libslic3r cereal::cereal imgui imguizmo minilzo GLEW::GLEW OpenGL::GL hidapi ${wxWidgets_LIBRARIES} glfw libcurl OpenSSL::SSL OpenSSL::Crypto noise::noise nanosvg)
+# The public headers of libslic3r_gui (PartPlate.hpp, Plater.hpp, ...) include wx headers: hand the include paths and
+# definitions of wxWidgets to the consumers outside src/ (tests/slic3rutils), which the directory-scope
+# include(wxWidgets_USE_FILE) of src/CMakeLists.txt does not reach.
+target_include_directories(libslic3r_gui SYSTEM PUBLIC ${wxWidgets_INCLUDE_DIRS})
+target_compile_definitions(libslic3r_gui PUBLIC ${wxWidgets_DEFINITIONS})
 
 if (MSVC)
     target_link_libraries(libslic3r_gui Setupapi.lib)

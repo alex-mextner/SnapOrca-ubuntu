@@ -252,6 +252,31 @@ std::string mask_secret_in_value(std::string v)
                                                             std::regex::icase),
                                                  // Email addresses
                                                  std::regex(R"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})")};
+    // libstdc++'s std::regex matcher recurses once per character consumed by a
+    // quantifier, so scanning a long run of non-whitespace (the token patterns
+    // above all stop at whitespace) overflows the stack. Such runs are opaque
+    // blobs: mask them wholesale instead of scanning them.
+    static constexpr std::size_t kMaxScannedRun = 4096;
+    if (v.size() > kMaxScannedRun) {
+        auto is_ws = [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; };
+        std::string bounded;
+        bounded.reserve(v.size());
+        for (std::size_t i = 0; i < v.size();) {
+            std::size_t run_end = i;
+            while (run_end < v.size() && !is_ws(v[run_end]))
+                ++run_end;
+            if (run_end - i > kMaxScannedRun)
+                bounded += "***";
+            else
+                bounded.append(v, i, run_end - i);
+            std::size_t ws_end = run_end;
+            while (ws_end < v.size() && is_ws(v[ws_end]))
+                ++ws_end;
+            bounded.append(v, run_end, ws_end - run_end);
+            i = ws_end;
+        }
+        v = std::move(bounded);
+    }
     for (const auto& re : deny)
         v = std::regex_replace(v, re, "***");
     return v;
@@ -326,10 +351,10 @@ std::string render_realtime_body(
             sanitized = hash_pii(id.client_id, v);
         } else if (is_pii_key(key)) {
             sanitized.clear();
-        } else if (looks_like_path(v)) {
-            sanitized = mask_secret_in_value(redact_path(id.home_for_redact, v));
         } else {
-            sanitized = mask_secret_in_value(v);
+            // Only the first kMaxExtValueBytes survive; don't regex-scan the rest.
+            const std::string head = utf8_safe_prefix(v, std::min(v.size(), 2 * kMaxExtValueBytes));
+            sanitized = looks_like_path(head) ? mask_secret_in_value(redact_path(id.home_for_redact, head)) : mask_secret_in_value(head);
         }
         sanitized = utf8_safe_prefix(sanitized, sanitized.size());
         if (sanitized.size() <= kMaxExtValueBytes)
@@ -600,11 +625,11 @@ std::string render_batch_line(
             out_val = hash_pii(ctx.clientId, v);
         } else if (is_pii_key(key)) {
             out_val.clear();
-        } else if (looks_like_path(v)) {
-            // Path-like: redact home prefix, then mask any remaining secrets.
-            out_val = mask_secret_in_value(redact_path(ctx.home_for_redact, v));
         } else {
-            out_val = mask_secret_in_value(v);
+            // Only the first kMaxExtValueBytes survive; don't regex-scan the rest.
+            // Path-like: redact home prefix, then mask any remaining secrets.
+            const std::string head = utf8_safe_prefix(v, std::min(v.size(), 2 * kMaxExtValueBytes));
+            out_val = looks_like_path(head) ? mask_secret_in_value(redact_path(ctx.home_for_redact, head)) : mask_secret_in_value(head);
         }
         // Per-value truncation.
         out_val = utf8_safe_prefix(out_val, out_val.size());
@@ -816,7 +841,7 @@ void SnapLogClient::rt_worker_loop(std::shared_ptr<Internals> in)
             return;
         if (in->deps_invalid.load(std::memory_order_relaxed))
             return;
-        if (!in->consent.load(std::memory_order_relaxed)) {
+        if (!in->consent.load(std::memory_order_relaxed) || in->rt_paused_for_test.load(std::memory_order_relaxed)) {
             // Consent false: sleep and re-check. We do NOT exit the thread on
             // consent-false (consent may flip back on); we just stop sending.
             std::this_thread::sleep_for(std::chrono::milliseconds(in->cfg.poll_interval_ms > 0 ? in->cfg.poll_interval_ms : 1));
@@ -1290,6 +1315,10 @@ void SnapLogClient::shutdown()
     if (!in)
         return;
     const bool deferred_consent_purge = purge_completion_active(m_purge_completion) && m_purge_spool_dir == in->spool_dir_resolved;
+    // Publish the final-flush request before stop_receiving: bt_worker reads
+    // stop_receiving without drain_and_flush as "exit once bt_queue is empty",
+    // and the realtime join below can hold this thread for seconds.
+    in->drain_and_flush.store(true);
     in->stop_receiving.store(true);
     cancel_current(in, SnapLogPolicy::Realtime); // abort in-flight so worker's done() trips
 
@@ -1337,17 +1366,9 @@ void SnapLogClient::shutdown()
         }
     }
 
-    bool batch_request_active = in->batch_requests_in_progress.load(std::memory_order_acquire) > 0;
-    // Cancelling an in-progress upload must not cause the flusher to issue a
-    // fresh create request before the synchronous do_request call unwinds.
-    if (batch_request_active)
-        in->stop_uploads.store(true, std::memory_order_release);
-    cancel_current(in, SnapLogPolicy::Buffered);
-
     if (in->bt_worker.joinable()) {
-        // Set drain_and_flush so bt_worker drains the remaining bt_queue to
-        // active.log, rotates to sealed, uploads, then exits.
-        in->drain_and_flush.store(true);
+        // drain_and_flush (published above) makes bt_worker drain the remaining
+        // bt_queue to active.log, rotate to sealed, upload, then exit.
         cancel_current(in, SnapLogPolicy::Buffered); // abort any in-flight PUT
 
         // Bounded join on bt_worker: same promise/future + detach + pin pattern
@@ -1668,6 +1689,12 @@ void SnapLogClient::set_auth_known_dead_for_test(bool v)
     in->auth_known_dead.store(v, std::memory_order_relaxed);
     if (!v)
         in->auth_dead_skip_counted.store(false, std::memory_order_relaxed);
+}
+
+void SnapLogClient::pause_realtime_worker_for_test(bool paused)
+{
+    if (auto in = internals())
+        in->rt_paused_for_test.store(paused, std::memory_order_relaxed);
 }
 
 std::string sanitize_file_name(std::string s)
@@ -2053,7 +2080,7 @@ static void attempt_upload(std::shared_ptr<SnapLogClient::Internals> in, uint64_
     if (!batch_worker_current(in, generation))
         return;
 
-    // A shutdown/consent transition that cancelled an in-flight request leaves
+    // A consent-OFF/re-init transition that cancelled an in-flight request leaves
     // its sealed file on disk and must not start another upload.
     if (in->stop_uploads.load(std::memory_order_acquire)) {
         if (in->bt_upload_phase != Phase::Idle) {
@@ -2097,10 +2124,7 @@ static void attempt_upload(std::shared_ptr<SnapLogClient::Internals> in, uint64_
             !in->deps.do_request)
             return false;
 
-        std::shared_ptr<SnapLogHandle> h;
-        in->batch_requests_in_progress.fetch_add(1, std::memory_order_acq_rel);
-        h = in->deps.do_request(method, url, std::move(headers), body_file, body_str);
-        in->batch_requests_in_progress.fetch_sub(1, std::memory_order_acq_rel);
+        std::shared_ptr<SnapLogHandle> h = in->deps.do_request(method, url, std::move(headers), body_file, body_str);
         if (!h)
             return false;
 
@@ -2350,9 +2374,7 @@ static void handle_bt_retry_or_fail(std::shared_ptr<SnapLogClient::Internals> in
     if (in->deps.do_request) {
         BatchRequest creq = build_batch_cancel_request(in->deps, in->cfg, in->bt_frozen_client_id, in->bt_frozen_token,
                                                        in->nonce_gen_for_test, /*uploadId*/ "");
-        in->batch_requests_in_progress.fetch_add(1, std::memory_order_acq_rel);
         (void) in->deps.do_request("POST", creq.url, creq.headers, nullptr, &creq.body);
-        in->batch_requests_in_progress.fetch_sub(1, std::memory_order_acq_rel);
     }
 
     if (!batch_worker_current(in, generation))
@@ -2375,10 +2397,7 @@ static void handle_bt_retry_or_fail(std::shared_ptr<SnapLogClient::Internals> in
         bool issued = false;
         if (batch_worker_current(in, generation) && !in->stop_uploads.load(std::memory_order_acquire) && !batch_deps_unavailable(*in) &&
             in->consent.load(std::memory_order_relaxed) && in->deps.do_request) {
-            std::shared_ptr<SnapLogHandle> h;
-            in->batch_requests_in_progress.fetch_add(1, std::memory_order_acq_rel);
-            h = in->deps.do_request("POST", req.url, req.headers, nullptr, &req.body);
-            in->batch_requests_in_progress.fetch_sub(1, std::memory_order_acq_rel);
+            std::shared_ptr<SnapLogHandle> h = in->deps.do_request("POST", req.url, req.headers, nullptr, &req.body);
             if (h) {
                 std::lock_guard<std::mutex> hk(in->m_h_mu);
                 if (batch_worker_current(in, generation) && !in->stop_uploads.load(std::memory_order_acquire) &&
@@ -2476,7 +2495,7 @@ void SnapLogClient::bt_worker_loop(std::shared_ptr<Internals> in, uint64_t gener
                 return;
         }
         //    stop_receiving && !drain_and_flush && queue empty -> exit.
-        if (in->stop_receiving.load(std::memory_order_relaxed) && !in->drain_and_flush.load(std::memory_order_relaxed)) {
+        if (in->stop_receiving.load(std::memory_order_acquire) && !in->drain_and_flush.load(std::memory_order_relaxed)) {
             std::size_t qsize;
             {
                 std::lock_guard<std::mutex> qk(in->queue_mu);

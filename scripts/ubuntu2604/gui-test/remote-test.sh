@@ -1,0 +1,366 @@
+#!/usr/bin/env bash
+# Runs GUI tests on a temporary Runpod CPU pod instead of this machine. The pod (plain ubuntu:26.04)
+# gets the build environment (provision.sh, which carries the app's runtime libraries) plus the GUI
+# test packages (provision-gui.sh), this harness, and every local file named in a test's arguments
+# (AppImages, projects). Each test then runs with SO_DIRECT=1, i.e. on the pod's own Xvfb without
+# docker, as an unprivileged user, and the result folders are copied back. The pod is deleted when
+# this script exits; as backstops a detached local process, and the pod itself when Runpod gives it
+# its credentials, delete it after RUNPOD_MAX_HOURS.
+#
+#   scripts/ubuntu2604/gui-test/remote-test.sh TEST [:: TEST]...
+#   TEST = [SO_VAR=VALUE...] fix-model-test.sh|update-test.sh ARG...
+#   e.g. remote-test.sh SO_FIX=0 fix-model-test.sh build/x.AppImage part.stp :: update-test.sh normal build/x.AppImage
+#
+# Results: SO_OUT (default ${TMPDIR:-/tmp}/snap-orca-gui-test) gets one folder per test, as a local
+# run does, plus remote-<time>.log with the console of every test, the pod, its price and run time.
+# Needs a Runpod API key (RUNPOD_API_KEY, or ~/.runpod/config.toml from `runpodctl doctor`) and an
+# SSH key (SSH_KEY, default ~/.ssh/id_ed25519).
+# Env: RUNPOD_CPU_FLAVORS (default cpu5c,cpu3c), RUNPOD_VCPU (default 8), RUNPOD_MAX_HOURS (default 2),
+# RUNPOD_POD_DCS (data centers, tried in order; default below), RUNPOD_START_MINUTES
+# (default 4): Runpod sometimes schedules a pod that never starts (no runtime, no SSH port) while
+# reporting the data center's stock as high; such a pod is deleted after that long and replaced
+# once in the data centers of RUNPOD_POD_DCS after the one that failed.
+# One pod at a time: while a remote-build.sh session pod exists (remote-build.sh --session start),
+# the tests run on that pod, which stays up. remote-build.sh and this script share a lock, so neither
+# starts while the other runs.
+# Exit status: 0 every test passed, 1 a test failed, 2 usage error, other: pod / transfer errors.
+set -euo pipefail
+
+HERE=$(dirname "$(readlink -f "$0")")
+FLAVORS=${RUNPOD_CPU_FLAVORS:-cpu5c,cpu3c} # compute-optimized, 2 GB RAM per vCPU
+VCPU=${RUNPOD_VCPU:-8}
+MAX_HOURS=${RUNPOD_MAX_HOURS:-2}
+# Secure-cloud data centers with cpu5c (the first two) or cpu3c, Europe first.
+POD_DCS=${RUNPOD_POD_DCS:-EUR-IS-1,EU-RO-1,EU-NL-1,EU-CZ-1,EU-SE-1,US-IL-1,US-KS-2,US-GA-2,US-WA-1,US-CA-2}
+POD_DCS=${POD_DCS//[[:space:]]/}
+START_MINUTES=${RUNPOD_START_MINUTES:-4}
+[[ $START_MINUTES =~ ^[1-9][0-9]*$ ]] || { echo "remote-test.sh: RUNPOD_START_MINUTES must be a positive integer" >&2; exit 2; }
+SSH_KEY=${SSH_KEY:-$HOME/.ssh/id_ed25519}
+OUT=${SO_OUT:-${TMPDIR:-/tmp}/snap-orca-gui-test}
+API=https://rest.runpod.io/v1
+POD_HARNESS=/opt/snap-orca/scripts/ubuntu2604 # same layout as the repository
+POD_HOME=/home/gui
+
+die() { echo "remote-test.sh: $1" >&2; exit "${2:-1}"; }
+usage() { sed -n '10,12p' "$0" >&2; exit 2; }
+step() { printf '== [%dm%02ds] %s\n' $((SECONDS / 60)) $((SECONDS % 60)) "$*" | tee -a "$LOG"; }
+
+# ---- the tests: one command line per test, local files replaced by their pod copies ----
+[[ $# -gt 0 ]] || usage
+uploads=()  # "LOCAL\tPOD" per distinct local file
+tests=()    # shell-quoted command lines run on the pod as the gui user
+upload_path() { # upload_path FILE: sets UPLOAD to the pod copy of FILE (each distinct file is sent once, keeping its name)
+    local real i
+    real=$(readlink -f "$1")
+    for i in "${!uploads[@]}"; do
+        if [[ ${uploads[i]%%$'\t'*} == "$real" ]]; then UPLOAD=${uploads[i]#*$'\t'}; return; fi
+    done
+    UPLOAD=$POD_HOME/in/${#uploads[@]}/$(basename "$real")
+    uploads+=("$real"$'\t'"$UPLOAD")
+}
+add_test() { # add_test WORD...: [SO_VAR=VALUE...] SCRIPT ARG...
+    local env=() script='' arg line
+    while [[ $# -gt 0 && $1 =~ ^SO_[A-Z_]+= ]]; do
+        case ${1%%=*} in SO_OUT | SO_PYTHON | SO_DIRECT | SO_WORK) die "$1: set by remote-test.sh" 2 ;; esac
+        env+=("$1")
+        shift
+    done
+    case ${1:-} in fix-model-test.sh | update-test.sh) script=$1 ;; *) die "unknown test '${1:-}'" 2 ;; esac
+    shift
+    line=$(printf '%q ' "${env[@]}" SO_DIRECT=1 "SO_OUT=$POD_HOME/results" bash "$POD_HARNESS/gui-test/$script")
+    for arg in "$@"; do
+        if [[ -f $arg ]]; then
+            upload_path "$arg"
+            arg=$UPLOAD
+        fi
+        line+=$(printf ' %q' "$arg")
+    done
+    tests+=("$line")
+}
+words=()
+for w in "$@" ::; do
+    if [[ $w == :: ]]; then
+        [[ ${#words[@]} -gt 0 ]] || usage
+        add_test "${words[@]}"
+        words=()
+    else
+        words+=("$w")
+    fi
+done
+
+api_key=${RUNPOD_API_KEY:-$(sed -nE 's/^apikey *= *"(.*)"/\1/p' "$HOME/.runpod/config.toml" 2>/dev/null || true)}
+[[ -n $api_key ]] || die "no Runpod API key: set RUNPOD_API_KEY or run runpodctl doctor"
+[[ -r $SSH_KEY.pub ]] || die "missing $SSH_KEY.pub"
+# Key passed through a curl config on stdin, not argv (visible in ps).
+api() { printf 'header = "Authorization: Bearer %s"\n' "$api_key" | curl -fsS -m 60 -K - -H 'Content-Type: application/json' "$@"; }
+# api_status URL: the HTTP status of a GET, 000 when there was no response.
+api_status() { printf 'header = "Authorization: Bearer %s"\n' "$api_key" | curl -sS -m 60 -K - -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || true; }
+# field KEY [SUBKEY]: value from the JSON object on stdin, empty when missing or not JSON.
+field() {
+    python3 -c 'import json, sys
+try:
+    v = json.load(sys.stdin)
+    for k in sys.argv[1:]:
+        v = v.get(k) if isinstance(v, dict) else None
+except ValueError:
+    v = None
+print("" if v is None else v)' "$@"
+}
+
+mkdir -p "$OUT"
+LOG=$(readlink -f "$OUT")/remote-$(date +%Y%m%d-%H%M%S).log
+session_dir=$(git -C "$HERE" rev-parse --path-format=absolute --git-common-dir)/remote-build-session
+exec 9>"$session_dir.lock" # shared with remote-build.sh
+flock -n 9 || die "another remote-build.sh or remote-test.sh of this repository is running (lock: $session_dir.lock)"
+tmp=$(mktemp -d)
+pod_id=""
+pod_start=""
+cost=""
+ip=""
+watchdog_pid=""
+session_pod="" # the remote-build.sh session pod the tests run on, if any
+fetched=""
+known_hosts=$tmp/known_hosts
+
+fetch_results() {
+    [[ -n $ip && -z $fetched ]] || return 0
+    fetched=1
+    rsync -a -e "ssh ${ssh_opts[*]}" "root@$ip:$POD_HOME/results/" "$OUT/" 2>>"$LOG" ||
+        echo "remote-test.sh: could not copy the results from the pod" | tee -a "$LOG" >&2
+}
+# shellcheck disable=SC2329 # invoked by the EXIT trap
+cleanup() {
+    local rc=$?
+    if [[ -n $pod_id ]]; then
+        local id=$pod_id
+        pod_id=""
+        fetch_results
+        step "deleting pod $id"
+        if delete_pod "$id"; then
+            local secs=$((SECONDS - pod_start))
+            step "pod $id deleted after $((secs / 60))m$((secs % 60))s (\$${cost:-?}/h: about \$$(python3 -c "print(f'{${cost:-0} * $secs / 3600:.3f}')"))"
+            [[ -z $watchdog_pid ]] || kill -- "-$watchdog_pid" 2>/dev/null || true # its session: bash + sleep
+        else # the detached deleter stays as the last backstop
+            echo "remote-test.sh: could not delete pod $id, delete it in the Runpod console" | tee -a "$LOG" >&2
+        fi
+    elif [[ -n $watchdog_pid ]]; then
+        kill -- "-$watchdog_pid" 2>/dev/null || true
+    fi
+    if [[ -n $session_pod ]]; then
+        fetch_results
+        step "session pod $session_pod kept (remote-build.sh --session stop deletes it)"
+    fi
+    rm -rf "$tmp"
+    exit "$rc"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+# Plain ubuntu:26.04: the start command only installs and starts sshd (and the pod's own deleter);
+# provisioning runs over SSH while the inputs upload.
+boot=$(cat <<'EOF'
+set -eo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends openssh-server ca-certificates curl rsync >/dev/null
+if [[ -n ${RUNPOD_API_KEY:-} && -n ${RUNPOD_POD_ID:-} ]]; then
+    ( sleep "$GUI_MAX_SECONDS"; curl -fsS -X DELETE -H "Authorization: Bearer $RUNPOD_API_KEY" "https://rest.runpod.io/v1/pods/$RUNPOD_POD_ID" ) &
+fi
+mkdir -p /root/.ssh /run/sshd
+chmod 700 /root/.ssh
+printf '%s\n' "$GUI_SSH_KEY" >/root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+ssh-keygen -A
+exec /usr/sbin/sshd -D -e
+EOF
+)
+pod_request() { # pod_request FLAVOR DCS: the create body
+    python3 - "$1" "$VCPU" "$((MAX_HOURS * 3600))" "$(cat "$SSH_KEY.pub")" "$boot" "$2" <<'EOF'
+import json, sys
+flavor, vcpu, max_seconds, pubkey, boot, dcs = sys.argv[1:]
+print(json.dumps({
+    "name": "snap-orca-gui-test", "computeType": "CPU", "cloudType": "SECURE",
+    "cpuFlavorIds": [flavor], "vcpuCount": int(vcpu),
+    "imageName": "ubuntu:26.04", "containerDiskInGb": 30, "ports": ["22/tcp"],
+    "env": {"GUI_SSH_KEY": pubkey, "GUI_MAX_SECONDS": max_seconds},
+    "dockerStartCmd": ["bash", "-c", boot],
+    # Without a list Runpod's default puts EU-RO-1 first; "custom" keeps the given order.
+    "dataCenterIds": dcs.split(","), "dataCenterPriority": "custom",
+}))
+EOF
+}
+# delete_pod ID: deletes the pod and waits up to a minute until the API no longer knows it (404).
+delete_pod() {
+    local code
+    api -X DELETE "$API/pods/$1" >/dev/null || true
+    for _ in $(seq 12); do
+        code=$(api_status "$API/pods/$1")
+        [[ $code == 404 ]] && return 0
+        sleep 5
+    done
+    echo "remote-test.sh: pod $1 still exists after deletion (HTTP $code)" >>"$LOG"
+    return 1
+}
+# start_pod DCS: creates a pod (pod_id, pod_dc, cost, pod_start) and a backstop deleter for it, then
+# waits up to START_MINUTES for its public SSH port (ip, port). Returns 0 with the port, 2 when no
+# flavor could be created (no pod), 1 when the pod got no SSH port (left for the caller to delete).
+start_pod() {
+    local flavor
+    pod=""
+    for flavor in ${FLAVORS//,/ }; do # one at a time, in order: with several, Runpod picks by availability
+        pod=$(api -X POST "$API/pods" -d "$(pod_request "$flavor" "$1")" 2>"$tmp/create.err") && break
+        pod=""
+    done
+    [[ -n $pod ]] || return 2
+    pod_id=$(field id <<<"$pod")
+    pod_start=$SECONDS
+    cost=$(field costPerHr <<<"$pod")
+    # Backstop if this script dies without its EXIT trap (kill -9, crash): a detached deleter, with
+    # the key in its environment rather than argv.
+    [[ -z $watchdog_pid ]] || kill -- "-$watchdog_pid" 2>/dev/null || true
+    # shellcheck disable=SC2016 # $RP_KEY/$RP_POD expand in the detached shell, not here
+    RP_KEY=$api_key RP_POD=$pod_id setsid bash -c "sleep $((MAX_HOURS * 3600)); "'printf "header = \"Authorization: Bearer %s\"\n" "$RP_KEY" | curl -fsS -m 60 -K - -X DELETE "'"$API"'/pods/$RP_POD"' \
+        </dev/null >/dev/null 2>&1 9>&- &
+    watchdog_pid=$!
+    ip="" port="" pod_dc=""
+    first_dc=${1%%,*} # where a pod that never gets a machine was meant to go
+    local deadline=$((SECONDS + START_MINUTES * 60)) reported=""
+    while ((SECONDS < deadline)); do
+        pod=$(api "$API/pods/$pod_id?includeMachine=true" || true)
+        pod_dc=${pod_dc:-$(field machine dataCenterId <<<"$pod")}
+        if [[ -z $reported && -n $pod_dc ]]; then
+            step "pod $pod_id in $pod_dc: $(field cpuFlavorId <<<"$pod") $(field vcpuCount <<<"$pod") vCPU $(field memoryInGb <<<"$pod") GB, \$$cost/h"
+            reported=1
+        fi
+        ip=$(field publicIp <<<"$pod")
+        port=$(field portMappings 22 <<<"$pod")
+        [[ -n $ip && -n $port ]] && return 0
+        ip=""
+        sleep 5
+    done
+    return 1
+}
+# next_dcs DC: POD_DCS starting after DC, without it (all of POD_DCS when DC is not in it).
+next_dcs() {
+    local -a dcs=() after=() before=()
+    local dc seen=""
+    IFS=, read -ra dcs <<<"$POD_DCS"
+    for dc in "${dcs[@]}"; do
+        if [[ $dc == "$1" ]]; then seen=1
+        elif [[ -n $seen ]]; then after+=("$dc")
+        else before+=("$dc"); fi
+    done
+    dcs=("${after[@]}" "${before[@]}")
+    (IFS=,; echo "${dcs[*]}")
+}
+
+step "${#tests[@]} test(s), ${#uploads[@]} file(s) to upload; results in $OUT"
+for t in "${tests[@]}"; do echo "   $t" | tee -a "$LOG"; done
+s_pod="" s_ip="" s_port="" s_dc="" s_cost=""
+if [[ -f $session_dir/state ]]; then
+    # shellcheck source=/dev/null
+    source "$session_dir/state"
+    code=$(api_status "$API/pods/$s_pod")
+    # Anything but a clear answer stops here: a second pod must not start next to a live session.
+    case $code in
+        200) ;;
+        404) s_pod="" ;; # remote-build.sh removes the state on its next start or run
+        *) die "cannot tell whether the session pod $s_pod still exists (Runpod API: HTTP $code); try again" ;;
+    esac
+fi
+if [[ -n $s_pod ]]; then
+    # The address as the API reports it now, in case Runpod moved the pod's SSH port.
+    pod=$(api "$API/pods/$s_pod" || true)
+    ip=$(field publicIp <<<"$pod") port=$(field portMappings 22 <<<"$pod")
+    session_pod=$s_pod ip=${ip:-$s_ip} port=${port:-$s_port} cost=$s_cost
+    known_hosts=$session_dir/known_hosts
+    step "on the remote-build.sh session pod $session_pod in $s_dc (\$$cost/h)"
+else
+    step "creating pod ($VCPU vCPU, $FLAVORS, in $POD_DCS)"
+    rc=0
+    start_pod "$POD_DCS" || rc=$?
+    ((rc != 2)) || die "pod creation failed: $(cat "$tmp/create.err")"
+    if ((rc == 1)); then
+        stuck_dc=${pod_dc:-$first_dc}
+        retry_dcs=$(next_dcs "$stuck_dc")
+        retry_dcs=${retry_dcs:-$POD_DCS} # RUNPOD_POD_DCS was only the failed data center
+        echo "remote-test.sh: warning: pod $pod_id in $stuck_dc got no SSH port in $START_MINUTES min, deleting it and retrying in $retry_dcs" | tee -a "$LOG" >&2
+        stuck_id=$pod_id
+        delete_pod "$stuck_id" || die "could not delete the stuck pod $stuck_id" # cleanup tries again
+        pod_id=""
+        step "pod $stuck_id deleted"
+        rc=0
+        start_pod "$retry_dcs" || rc=$?
+        ((rc != 2)) || die "pod creation failed: $(cat "$tmp/create.err")"
+        ((rc == 0)) || die "pod $pod_id${pod_dc:+ in $pod_dc} got no SSH port in $START_MINUTES min either"
+    fi
+fi
+ssh_opts=(-i "$SSH_KEY" -p "$port" -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30
+          -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$known_hosts")
+# shellcheck disable=SC2029 # commands are built locally on purpose
+on_pod() { ssh "${ssh_opts[@]}" "root@$ip" "$@"; }
+for _ in $(seq 60); do
+    on_pod true 2>/dev/null && break
+    sleep 5
+done
+on_pod true || die "pod ${pod_id:-$session_pod}: SSH on $ip:$port does not answer"
+step "pod reachable at $ip:$port"
+if [[ -z $session_pod ]] && ! on_pod 'tr "\0" "\n" </proc/1/environ | grep -q "^RUNPOD_API_KEY=." && tr "\0" "\n" </proc/1/environ | grep -q "^RUNPOD_POD_ID=."'; then
+    echo "remote-test.sh: warning: Runpod gave the pod no API key, so it cannot delete itself; a pod orphaned by this machine going down keeps billing" | tee -a "$LOG" >&2
+fi
+
+step "provisioning (provision.sh, provision-gui.sh, iproute2, numpy/scipy/trimesh for analyze-3mf.py; skipped on a pod provisioned by the same scripts) while uploading"
+# A session pod keeps the gui user and its packages between runs, but not earlier results.
+on_pod "{ id gui >/dev/null 2>&1 || useradd -m -d $POD_HOME gui; } && rm -rf $POD_HOME/results && mkdir -p $POD_HARNESS $POD_HOME/results && touch /etc/snap-orca-throwaway"
+rsync -a -e "ssh ${ssh_opts[*]}" "$HERE/../provision.sh" "root@$ip:$POD_HARNESS/"
+rsync -a --exclude __pycache__ -e "ssh ${ssh_opts[*]}" "$HERE/" "root@$ip:$POD_HARNESS/gui-test/"
+on_pod "bash -s" >"$tmp/provision.log" 2>&1 <<EOF &
+set -euo pipefail
+want=\$(cat $POD_HARNESS/provision.sh $POD_HARNESS/gui-test/provision-gui.sh | sha256sum | cut -c1-16)
+[[ \$(cat /root/gui.provisioned 2>/dev/null) != "\$want" ]] || exit 0
+bash $POD_HARNESS/provision.sh
+bash $POD_HARNESS/gui-test/provision-gui.sh
+apt-get update
+apt-get install -y --no-install-recommends iproute2 python3-numpy python3-scipy
+apt-get install -y --no-install-recommends python3-trimesh ||
+    { apt-get install -y --no-install-recommends python3-pip && pip install --break-system-packages trimesh; }
+rm -rf /var/lib/apt/lists/*
+echo "\$want" >/root/gui.provisioned
+EOF
+provision_pid=$!
+for u in "${uploads[@]}"; do
+    on_pod "mkdir -p '$(dirname "${u#*$'\t'}")'"
+    rsync -a -e "ssh ${ssh_opts[*]}" "${u%%$'\t'*}" "root@$ip:${u#*$'\t'}"
+done
+on_pod "chown -R gui:gui $POD_HOME"
+step "uploaded"
+if ! wait "$provision_pid"; then
+    tail -n 30 "$tmp/provision.log" | tee -a "$LOG"
+    die "provisioning failed"
+fi
+step "provisioned"
+# shellcheck disable=SC2016 # expands on the pod
+on_pod 'echo "pod: $(nproc) CPUs, /dev/shm $(df -h --output=size /dev/shm | tail -n1 | tr -d " ")"' | tee -a "$LOG"
+# The container mode runs the app with --network none; here the pod's network namespace is only
+# replaceable when the pod may unshare one (then with loopback up for update-test.sh's local server).
+run_as=(runuser -u gui --)
+if on_pod "unshare -n -- ip link set lo up" 2>/dev/null; then
+    run_as=(unshare -n -- sh -c "'ip link set lo up && exec \"\$@\"'" sh "${run_as[@]}")
+    step "network: isolated (unshare -n, loopback only)"
+else
+    step "network: NOT isolated (the pod may not unshare a network namespace); the app can reach the internet"
+fi
+
+failed=0
+for t in "${tests[@]}"; do
+    step "test: $t"
+    set +e
+    on_pod "cd $POD_HOME && ${run_as[*]} env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 $t" 2>&1 | tee -a "$LOG"
+    rc=${PIPESTATUS[0]}
+    set -e
+    step "exit $rc"
+    [[ $rc == 0 ]] || failed=1
+done
+fetch_results
+step "results copied to $OUT"
+exit "$failed"

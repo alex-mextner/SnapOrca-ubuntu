@@ -50,6 +50,9 @@ class PrintHostQueueDialog;
 class Plater;
 class MainFrame;
 class ParamsDialog;
+#ifdef __WXGTK__
+class ResizeEdgePanel;
+#endif
 
 enum QuickSlice
 {
@@ -190,6 +193,16 @@ class MainFrame : public DPIFrame
 
     //jump to editor under preview only mode
     bool preview_only_to_editor = false;
+
+#ifdef __WXGTK__
+    // The frame is undecorated on GTK (BBLTopbar draws the title bar), so resizing is done by
+    // thin panels along the edges.
+    friend class ResizeEdgePanel;
+    ResizeEdgePanel* m_edge_bottom{nullptr};
+    ResizeEdgePanel* m_edge_left{nullptr};
+    ResizeEdgePanel* m_edge_right{nullptr};
+    void update_edge_panels();
+#endif // __WXGTK__
 
 protected:
     virtual void on_dpi_changed(const wxRect &suggested_rect) override;

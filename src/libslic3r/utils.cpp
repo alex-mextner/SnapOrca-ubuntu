@@ -164,6 +164,8 @@ unsigned get_logging_level()
 }
 
 boost::shared_ptr<boost::log::sinks::synchronous_sink<boost::log::sinks::text_file_backend>> g_log_sink;
+// boost expands the %N of the sink's file name pattern to the rotation counter, which starts at 0.
+std::string g_log_file_path;
 
 // Force set_logging_level(<=error) after loading of the DLL.
 // This is currently only needed if libslic3r is loaded as a shared library into Perl interpreter
@@ -351,6 +353,9 @@ void set_log_path_and_level(const std::string& file, unsigned int level)
 	g_log_sink = boost::log::add_file_log(
 		keywords::file_name = full_path.string() + ".%N",
 		keywords::rotation_size = 100 * 1024 * 1024,
+		// Append, so that a crash report written through another descriptor of this file (CrashDiagnostics.cpp) is never
+		// overwritten by a record boost still has to write at its own offset.
+		keywords::open_mode = std::ios_base::out | std::ios_base::app,
 		keywords::format =
 		(
 			expr::stream
@@ -362,6 +367,7 @@ void set_log_path_and_level(const std::string& file, unsigned int level)
 	);
 
 	logging::add_common_attributes();
+	g_log_file_path = full_path.string() + ".0";
 
 	set_logging_level(level);
 
@@ -374,6 +380,11 @@ void flush_logs()
 		g_log_sink->flush();
 
 	return;
+}
+
+const std::string& current_log_file_path()
+{
+	return g_log_file_path;
 }
 
 #ifdef _WIN32

@@ -543,6 +543,9 @@ struct FakeClient
         SnapLogDeps   d = deps; // copy (lambdas capture by value via this*)
         SnapLogConfig c = cfg;
         SnapLogClient::instance().init(std::move(d), std::move(c));
+        // These tests check what log() admits into the realtime queue; a worker draining it
+        // concurrently would make the queue size depend on scheduling.
+        SnapLogClient::instance().pause_realtime_worker_for_test(true);
         // Default to logged-in so existing tests pass the login gate (log()
         // drops events when user_token is empty). Tests that exercise the
         // gate itself call set_user_token("") explicitly.
@@ -2914,6 +2917,43 @@ TEST_CASE("batch lifecycle: shutdown drain flushes bt_queue to sealed and upload
     REQUIRE(list_sealed(f.spool).empty());
     // At least one create+completed happened (the drained events).
     REQUIRE(f.create_count.load() >= 1);
+    REQUIRE(f.completed_count.load() >= 1);
+}
+
+// shutdown() joins rt_worker before it waits for the batch flush. A realtime
+// transport that ignores cancellation (e.g. stuck in DNS) stretches that join
+// up to the realtime deadline; bt_worker must keep draining + uploading through
+// it rather than read the already-published stop_receiving as "exit now".
+TEST_CASE("batch lifecycle: shutdown drain uploads while realtime join is slow", "[snaplog][batch]")
+{
+    BatchLifecycleFixture f;
+
+    // Park the realtime request until the batch upload has finished (sealed
+    // deleted), bounded well below the 2 s shutdown realtime deadline so
+    // shutdown never falls into its deps_invalid branch.
+    std::atomic<bool> rt_entered{false};
+    auto              fulfil = f.deps.do_request;
+    f.deps.do_request        = [&f, &rt_entered, fulfil](const std::string& method, const std::string& url,
+                                                  std::vector<std::pair<std::string, std::string>> headers,
+                                                  const boost::filesystem::path* body_file, const std::string* body_str) {
+        if (url.find("/upload/print") != std::string::npos && !rt_entered.exchange(true))
+            f.wait_until([&f]() { return f.completed_count.load() >= 1 && list_sealed(f.spool).empty(); }, 1000);
+        return fulfil(method, url, std::move(headers), body_file, body_str);
+    };
+
+    f.init();
+    SnapLogClient::instance().log(SnapLogLevel::Info, "rt-stall", SnapLogExt{{"eventName", "drain_test"}}, SnapLogPolicy::Realtime,
+                                  __FUNCTION__, __LINE__);
+    REQUIRE(f.wait_until([&]() { return rt_entered.load(); }));
+
+    for (int i = 0; i < 3; ++i) {
+        SnapLogClient::instance().log(SnapLogLevel::Info, "drain-event-" + std::to_string(i),
+                                      SnapLogExt{{"eventName", "drain_test"}, {"opId", "op" + std::to_string(i)}}, SnapLogPolicy::Buffered,
+                                      __FUNCTION__, __LINE__);
+    }
+    f.shutdown();
+
+    REQUIRE(list_sealed(f.spool).empty());
     REQUIRE(f.completed_count.load() >= 1);
 }
 

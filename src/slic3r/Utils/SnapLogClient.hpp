@@ -443,6 +443,10 @@ public:
     bool auth_known_dead_for_test() const;
     void set_auth_known_dead_for_test(bool v);
 
+    // Test-only: while paused, the realtime worker neither pops nor sends, so tests of log()
+    // admission (queue size, eviction, drops) do not race with delivery. No-op when un-init'd.
+    void pause_realtime_worker_for_test(bool paused);
+
     // Test-only: override the nonce generator used by the worker so X-Sign is
     // deterministic in tests. Pass an empty function to restore the default
     // (RAND_bytes). No-op when un-init'd.
@@ -506,6 +510,7 @@ public:
         std::atomic<bool>     consent{true};
         std::atomic<bool>     stop_receiving{true}; // true until init() flips it
         std::atomic<bool>     deps_invalid{false};
+        std::atomic<bool>     rt_paused_for_test{false};
         std::atomic<uint64_t> dropped{0};
 
         // --- Identity (guarded by token_mu) ---
@@ -537,9 +542,8 @@ public:
         std::deque<RtEvent>   bt_queue;
         std::atomic<bool>     auth_known_dead{false};        // set on 401/403 (B5)
         std::atomic<bool>     drain_and_flush{false};        // shutdown final-flush (B5/B6)
-        std::atomic<bool>     stop_uploads{false};           // shutdown/consent aborts uploads
+        std::atomic<bool>     stop_uploads{false};           // consent-OFF/re-init aborts uploads
         std::atomic<bool>     batch_deps_invalid{false};     // batch-only dependency fence
-        std::atomic<uint32_t> batch_requests_in_progress{0}; // synchronous do_request calls
         std::atomic<uint64_t> batch_queue_dropped{0};
         std::atomic<uint64_t> auth_dead_create_skipped{0}; // bumped in B5
         std::atomic<bool>     auth_dead_skip_counted{false};

@@ -38,6 +38,7 @@
 #include "slic3r/GUI/format.hpp"
 #include "slic3r/GUI/NotificationManager.hpp"
 #include "slic3r/Utils/Http.hpp"
+#include "slic3r/Utils/PresetStagingValidation.hpp"
 #include "slic3r/Config/Version.hpp"
 #include "slic3r/Config/Snapshot.hpp"
 #include "slic3r/GUI/MarkdownTip.hpp"
@@ -55,6 +56,7 @@ using Slic3r::GUI::Config::SnapshotDB;
 // FIXME: Incompat bundle resolution doesn't deal with inherited user presets
 
 namespace Slic3r {
+
 namespace {
 
 // While profile `MsgUpdateConfig` is shown, nested profile checks are suppressed.
@@ -117,6 +119,10 @@ struct Update
 
     bool can_install{true};
 
+    // False for the bundled printers resource folder (machine images and gcode, tagged "bbl" for the
+    // update dialogs): it has no preset subdirectories and no <vendor>.json to be validated against.
+    bool is_vendor_profile{true};
+
 	Update() {}
 	//BBS: add directory support
 	//BBS: use changelog string instead of url
@@ -152,20 +158,9 @@ struct Update
             auto validate_staging = [this](const fs::path &staging) -> bool {
                 if (vendor.empty())
                     return true;
-
-                const bool has_preset_tree = fs::exists(staging / PRESET_PRINTER_NAME) || fs::exists(staging / PRESET_FILAMENT_NAME) ||
-                                             fs::exists(staging / PRESET_PRINT_NAME);
-                if (!has_preset_tree) {
-                    BOOST_LOG_TRIVIAL(error) << Slic3r::format("Profile staging for %1% is missing preset subdirectories", vendor);
-                    return false;
-                }
-
-                const fs::path vendor_json = target.parent_path() / (vendor + ".json");
-                if (!fs::exists(vendor_json)) {
-                    BOOST_LOG_TRIVIAL(error) << Slic3r::format("Profile staging: %1%.json is not installed yet", vendor);
-                    return false;
-                }
-                return true;
+                if (!is_vendor_profile)
+                    return validate_printers_resource_staging(staging);
+                return validate_vendor_profile_staging(staging, target.parent_path(), vendor);
             };
             return atomic_replace_directory(source, target, file_filter, validate_staging);
         }
@@ -1481,6 +1476,7 @@ Updates PresetUpdater::priv::get_printer_config_updates(bool update) const
         } catch (...) {}
     }
     updates.updates.emplace_back(std::move(resc_folder), std::move(config_folder), version, "bbl", change_log, version.comment, false, true);
+    updates.updates.back().is_vendor_profile = false;
     return updates;
 }
 

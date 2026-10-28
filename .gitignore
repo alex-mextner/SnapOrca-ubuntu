@@ -51,3 +51,5 @@ sentry-native/
 CLAUDE.md
 # snapmaker_connection CLI binaries are placed into resources/ locally per platform/architecture and are not tracked
 /resources/snapmaker_connection*
+# Release assets assembled by scripts/fork-sync/release.sh
+/dist/

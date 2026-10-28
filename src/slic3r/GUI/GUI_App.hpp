@@ -64,6 +64,7 @@ struct wxLanguageInfo;
 namespace Slic3r {
 namespace GUI {
     class UpdateVersionDialog;
+    enum class AppImageUpdateResult;
 };
 };
 
@@ -180,6 +181,8 @@ public:
     std::string version_name;
     std::string description;
     std::string url;
+    std::string sha256; // of the file at `url`; checked before an in-place AppImage update
+    size_t      size{0}; // of the file at `url` in bytes, 0 if unknown
     bool        force_upgrade{ false };
     int      ver_items[VERSION_LEN];  // AA.BB.CC.DD
     VersionInfo() {
@@ -574,8 +577,12 @@ private:
 
     void            check_preset_version();
     void            check_new_version_sf(bool show_tips = false, bool by_user = false);
-    // Gray release: POST /config/get (snapmaker-config) first, falls back to check_new_version_sf on failure
+    // Gray release: POST /config/get (snapmaker-config) first, falls back to check_new_version_sf on failure.
+    // Linux builds skip the gray release and always use check_new_version_sf (the fork's own releases).
     void            request_version_from_config(bool show_tips = false, bool by_user = false);
+    // Installs the offered update: in place for a Linux AppImage, otherwise (NotApplicable) via the
+    // browser. On RestartRequested the caller closes the main window.
+    AppImageUpdateResult download_update(const std::string& url);
     void            process_network_msg(std::string dev_id, std::string msg);
     void            enter_force_upgrade();
     void            set_skip_version(bool skip = true);

@@ -8,7 +8,19 @@ get_filename_component(_TEST_NAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 add_executable(${_TEST_NAME}_tests
     ${_TEST_NAME}_tests_main.cpp
     SnapLogClient_test.cpp
+    PartPlateCli_test.cpp
+    PresetUpdaterStaging_test.cpp
+    GLCanvasAttribs_test.cpp
     )
+
+# GLCanvasAttribs_test.cpp includes the wx GL headers; the wx include dirs and definitions are only
+# applied to the src/ directory scope.
+if (SLIC3R_WX_STABLE)
+    find_package(wxWidgets 3.0 REQUIRED COMPONENTS base core gl)
+else ()
+    find_package(wxWidgets 3.1 REQUIRED COMPONENTS base core gl)
+endif ()
+include(${wxWidgets_USE_FILE})
 
 find_package(JPEG REQUIRED)
 find_package(PNG REQUIRED)
@@ -27,7 +39,22 @@ if(UNIX AND NOT APPLE)
     target_link_options(${_TEST_NAME}_tests PRIVATE "-Wl,--no-as-needed")
 endif()
 if(TARGET libslic3r_gui)
-    target_link_libraries(${_TEST_NAME}_tests PRIVATE libslic3r_gui ${TEST_LINK_LIBS})
+    # libslic3r_gui compiles the nanoSVG implementation itself (BitmapCache.cpp); linking test_nanosvg_impl as well
+    # defines every nsvg* symbol twice.
+    set(_gui_test_link_libs ${TEST_LINK_LIBS})
+    list(REMOVE_ITEM _gui_test_link_libs test_nanosvg_impl)
+    target_link_libraries(${_TEST_NAME}_tests PRIVATE libslic3r_gui ${_gui_test_link_libs})
+    # libslic3r_gui calls into sources that only the application executable compiles (Sentry wrapper, bury point,
+    # common_func); compile them into the test executable too.
+    target_sources(${_TEST_NAME}_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/sentry_wrapper/SentryWrapper.cpp
+        ${CMAKE_SOURCE_DIR}/src/bury_cfg/bury_point.cpp
+        ${CMAKE_SOURCE_DIR}/src/common_func/common_func.cpp)
+    target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    if (SLIC3R_SENTRY)
+        target_compile_definitions(${_TEST_NAME}_tests PRIVATE SLIC3R_SENTRY)
+        target_link_libraries(${_TEST_NAME}_tests PRIVATE sentry::sentry)
+    endif ()
 else()
     target_link_libraries(${_TEST_NAME}_tests PRIVATE ${TEST_LINK_LIBS})
 endif()
