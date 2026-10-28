@@ -208,7 +208,7 @@ base=$prev_tag
 if [[ -z $base ]] && git fetch -q --no-tags "$UPSTREAM_URL" "+refs/tags/v$version:refs/tags/v$version"; then
     base=v$version
 fi
-changes=$(git log --no-merges --format='- %s' ${base:+"$base"..}HEAD -- . ':!version.inc' | head -50)
+changes=$(git log -n 50 --no-merges --format='- %s' ${base:+"$base"..}HEAD -- . ':!version.inc')
 cat >dist/notes.md <<EOF
 Snapmaker Orca $version for Linux (Ubuntu 26.04), fork build $build.
 
