@@ -24,7 +24,7 @@ LISTS = {"machine": "machine_list", "process": "process_list", "filament": "fila
 
 
 def load_index(vendor_json: Path) -> dict[tuple[str, str], Path]:
-    vendor = json.loads(vendor_json.read_text(encoding="utf-8"))
+    vendor = json.loads(vendor_json.read_text(encoding="utf-8-sig"))
     vendor_dir = vendor_json.with_suffix("")
     return {
         (kind, entry["name"]): vendor_dir / entry["sub_path"]
@@ -43,7 +43,7 @@ def flatten(index: dict[tuple[str, str], Path], kind: str, name: str) -> dict:
         path = index.get((kind, name))
         if path is None:
             raise SystemExit(f"{kind} preset '{name}' not found in vendor index")
-        preset = json.loads(path.read_text(encoding="utf-8"))
+        preset = json.loads(path.read_text(encoding="utf-8-sig"))
         chain.append(preset)
         name = preset.get("inherits", "")
 
