@@ -22,6 +22,7 @@ namespace Slic3r { namespace Test {
 static void init_degenerate_raft_print(Print& print)
 {
     DynamicPrintConfig config = Test::default_print_config();
+    // Print::validate() requires G92 E0 in the layer change gcode with relative extruder addressing, which the wipe tower needs.
     config.set_deserialize_strict({
         { "nozzle_diameter", "0.4,0.4" },
         { "filament_diameter", "1.75,1.75" },
@@ -30,7 +31,8 @@ static void init_degenerate_raft_print(Print& print)
         { "enable_prime_tower", true },
         { "raft_layers", 1 },
         { "support_filament", 2 },
-        { "machine_start_gcode", "" }
+        { "machine_start_gcode", "" },
+        { "layer_change_gcode", "G92 E0" }
         });
 
     Model model;
@@ -67,7 +69,8 @@ static void init_multi_extruder_print(Print& print, const std::string& adhesiven
         { "enable_prime_tower",             true },
         { "filament_adhesiveness_category", adhesiveness_categories },
         { "wipe_tower_filament",            wall_filament },
-        { "machine_start_gcode",            "" }
+        { "machine_start_gcode",            "" },
+        { "layer_change_gcode",             "G92 E0" }
         });
 
     Model model;
