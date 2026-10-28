@@ -10,7 +10,15 @@ bash "$HOME/work/env/server-env.sh" install || exit 1
 # shellcheck disable=SC1091
 source "$HOME/work/env/server-env.sh"
 cd "$HOME/work/$name" || exit 1
-CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)
+# The server is shared: its /tmp is a 16 GB tmpfs that other sessions fill up (cc1plus then dies with "Disk quota exceeded"), so keep
+# compiler temp files on disk, and one cc1plus needs up to ~4 GiB (boost spirit, PCH), so size the parallel jobs by the memory free now.
+TMPDIR=$HOME/work/tmp
+mkdir -p "$TMPDIR"
+export TMPDIR
+jobs=$(($(awk '/^MemAvailable:/ {print $2}' /proc/meminfo) / 3500000))
+((jobs < 1)) && jobs=1
+((jobs > $(nproc))) && jobs=$(nproc)
+CMAKE_BUILD_PARALLEL_LEVEL=$jobs
 export CMAKE_BUILD_PARALLEL_LEVEL
 if [[ -n $cmd ]]; then
     eval "$cmd"
