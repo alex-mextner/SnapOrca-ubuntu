@@ -193,6 +193,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoSVG.hpp
     #GUI/Gizmos/GLGizmoText.cpp
     #GUI/Gizmos/GLGizmoText.hpp
+    GUI/GLBindTrap.cpp
+    GUI/GLBindTrap.hpp
     GUI/GLCanvas3D.cpp
     GUI/GLCanvas3D.hpp
     GUI/GLModel.cpp

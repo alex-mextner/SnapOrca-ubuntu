@@ -10136,6 +10136,8 @@ struct Plater::priv
     bool m_slice_all{false};
     bool m_is_slicing {false};
     bool m_is_publishing {false};
+    // The GL context loss switched the toolpath preview off; recovery switches it back on.
+    bool m_toolpaths_off_for_gl_loss {false};
     int m_is_RightClickInLeftUI{-1};
     int m_cur_slice_plate;
     //BBS: m_slice_all in .gcode.3mf file case, set true when slice all
@@ -19187,6 +19189,53 @@ void Plater::refresh_print()
     p->preview->refresh_print();
 }
 
+void Plater::on_gl_context_lost()
+{
+    if (p->preview == nullptr)
+        return;
+
+    // Later loads of the preview keep the toolpath vertex buffers off the GPU, like after the low-memory dialog, until
+    // the context binds again. A skip the low-memory dialog asked for stays.
+    if (!p->preview->get_skip_toolpath_preview()) {
+        p->preview->set_skip_toolpath_preview(true);
+        p->m_toolpaths_off_for_gl_loss = true;
+    }
+
+    // The toolpath buffers live in the context shared by all canvases: free them through whichever canvas still binds it.
+    GLCanvas3D* preview_canvas = p->preview->get_canvas3d();
+    if (preview_canvas == nullptr || !preview_canvas->get_gcode_viewer().has_data())
+        return;
+
+    GLCanvas3D* binders[] = {preview_canvas, p->view3D != nullptr ? p->view3D->get_canvas3d() : nullptr,
+                             p->assemble_view != nullptr ? p->assemble_view->get_canvas3d() : nullptr};
+    for (GLCanvas3D* canvas : binders) {
+        if (canvas != nullptr && canvas->make_current_for_gl_release()) {
+            preview_canvas->reset_gcode_toolpaths();
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": GL context lost, freed the toolpath GPU buffers, later previews skip them";
+            return;
+        }
+    }
+    BOOST_LOG_TRIVIAL(warning)
+        << __FUNCTION__
+        << ": GL context lost and no canvas can bind the context, the toolpath GPU buffers stay until the preview is loaded again";
+}
+
+void Plater::on_gl_context_recovered(GLCanvas3D& canvas)
+{
+    const bool is_preview = p->preview != nullptr && &canvas == p->preview->get_canvas3d();
+    if (!is_preview)
+        canvas.reload_scene(true, true);
+    if (is_preview || p->m_toolpaths_off_for_gl_loss) {
+        if (p->m_toolpaths_off_for_gl_loss) {
+            p->preview->set_skip_toolpath_preview(false);
+            p->m_toolpaths_off_for_gl_loss = false;
+        }
+        // Also forgets the loaded print, which a load skipped while lost would otherwise pass for loaded.
+        reload_gcode_preview();
+    }
+    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": GL context recovered, reloaded the canvas";
+}
+
 // BBS
 wxString Plater::get_project_name()
 {
@@ -19195,7 +19244,11 @@ wxString Plater::get_project_name()
 
 void Plater::update_all_plate_thumbnails(bool force_update)
 {
-    get_view3D_canvas3D()->make_current_for_postinit();
+    GLCanvas3D* view3D_canvas = get_view3D_canvas3D();
+    view3D_canvas->make_current_for_postinit();
+    // the thumbnails are rendered through this canvas
+    if (view3D_canvas->is_gl_lost())
+        return;
     bool rendered = false;
     for (int i = 0; i < get_partplate_list().get_plate_count(); i++) {
         PartPlate* plate = get_partplate_list().get_plate(i);
@@ -21297,6 +21350,8 @@ bool Plater::reslice()
     // when available physical memory drops below the threshold (PrintBase.hpp).
     // The guard checks every 500ms at the 138 throw_if_canceled() checkpoints.
     p->preview->set_skip_toolpath_preview(false);
+    // A new slice decides the skip afresh: a later GL recovery must not undo what the memory guard below asks for.
+    p->m_toolpaths_off_for_gl_loss = false;
     if (printer_technology() == ptFFF) {
         Print* print_ptr = p->background_process.fff_print();
         if (print_ptr) {
