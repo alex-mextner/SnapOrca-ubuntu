@@ -8,6 +8,7 @@
 
 #include "3DScene.hpp"
 #include "OpenGLManager.hpp"
+#include "GLBindTrap.hpp"
 #include "GUI_App.hpp"
 #include "GLModel.hpp"
 #include "GLSubTextureBindRenderer.hpp"
@@ -512,7 +513,7 @@ bool GLTexture::load_from_svg_files_as_sprites_array(const std::vector<std::stri
 void GLTexture::reset()
 {
     if (m_id != 0)
-        glsafe(::glDeleteTextures(1, &m_id));
+        delete_gl_textures(1, &m_id);
 
     m_id = 0;
     m_width = 0;

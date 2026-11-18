@@ -20,6 +20,7 @@
 #include "GUI_Utils.hpp"
 #include "GUI.hpp"
 #include "GLCanvas3D.hpp"
+#include "GLBindTrap.hpp"
 #include "GLToolbar.hpp"
 #include "GUI_Preview.hpp"
 #include "PathData.hpp"
@@ -189,7 +190,7 @@ void GCodeViewer::VBuffer::reset()
 {
     // release gpu memory
     if (!vbos.empty()) {
-        glsafe(::glDeleteBuffers(static_cast<GLsizei>(vbos.size()), static_cast<const GLuint*>(vbos.data())));
+        delete_gl_buffers(static_cast<int>(vbos.size()), static_cast<const GLuint*>(vbos.data()));
         vbos.clear();
     }
     sizes.clear();
@@ -201,7 +202,7 @@ void GCodeViewer::InstanceVBuffer::Ranges::reset()
     for (Range& range : ranges) {
         // release gpu memory
         if (range.vbo > 0)
-            glsafe(::glDeleteBuffers(1, &range.vbo));
+            delete_gl_buffers(1, &range.vbo);
     }
 
     ranges.clear();
@@ -220,7 +221,7 @@ void GCodeViewer::IBuffer::reset()
 {
     // release gpu memory
     if (ibo > 0) {
-        glsafe(::glDeleteBuffers(1, &ibo));
+        delete_gl_buffers(1, &ibo);
         ibo = 0;
     }
 
@@ -326,12 +327,12 @@ float GCodeViewer::Extrusions::Range::get_value_at_step(int step) const {
 }
 GCodeViewer::SequentialRangeCap::~SequentialRangeCap() {
     if (ibo > 0)
-        glsafe(::glDeleteBuffers(1, &ibo));
+        delete_gl_buffers(1, &ibo);
 }
 
 void GCodeViewer::SequentialRangeCap::reset() {
     if (ibo > 0)
-        glsafe(::glDeleteBuffers(1, &ibo));
+        delete_gl_buffers(1, &ibo);
 
     buffer = nullptr;
     ibo = 0;

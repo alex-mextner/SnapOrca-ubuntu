@@ -2376,9 +2376,9 @@ void GLCanvas3D::reset_volumes(ResetVolumesMode mode)
     if (m_volumes.empty())
         return;
 
+    // A lost canvas drops its volumes too: their GL buffers are deleted once a context binds again (delete_gl_buffers()),
+    // and volumes kept for a model that changed meanwhile would be resolved against it.
     _set_current();
-    if (m_gl_lost)
-        return;
 
     if (mode == ResetVolumesMode::Normal)
         m_selection.clear();
@@ -2431,6 +2431,21 @@ ModelInstanceEPrintVolumeState GLCanvas3D::check_volumes_outside_state() const
         return ModelInstancePVS_Inside;
     }
     //assert(m_initialized);
+
+    // A lost canvas dropped its volumes (reload_scene()): judge by the instances' states, which
+    // Plater::priv::update_print_volume_state() computes from the model, so a plate with an object across the bed edge
+    // is not passed as sliceable.
+    if (m_gl_lost && m_volumes.empty() && m_model != nullptr) {
+        ModelInstanceEPrintVolumeState model_state = ModelInstancePVS_Inside;
+        for (const ModelObject* object : m_model->objects)
+            for (const ModelInstance* instance : object->instances) {
+                if (instance->print_volume_state == ModelInstancePVS_Partly_Outside)
+                    return ModelInstancePVS_Partly_Outside;
+                if (instance->print_volume_state == ModelInstancePVS_Fully_Outside)
+                    model_state = ModelInstancePVS_Fully_Outside;
+            }
+        return model_state;
+    }
 
     ModelInstanceEPrintVolumeState state;
     m_volumes.check_outside_state(m_bed.build_volume(), &state);
@@ -2912,6 +2927,12 @@ bool GLCanvas3D::make_current_for_postinit() {
     return _set_current();
 }
 
+bool GLCanvas3D::make_current_for_gl_work()
+{
+    _set_current();
+    return !m_gl_lost && gl_context_bound();
+}
+
 void GLCanvas3D::render(bool only_init)
 {
     if (m_in_render) {
@@ -2933,7 +2954,8 @@ void GLCanvas3D::render(bool only_init)
 
     // A lost canvas draws nothing. Graphics memory is often short only while another program peaks, so the bind is
     // retried by m_gl_recovery_timer and by render requests (expose, resize), at most twice a second because a failing
-    // bind costs an X round trip.
+    // bind costs an X round trip. A hidden canvas (another tab is shown) is not retried: switching back to its tab marks
+    // it dirty (Plater::priv::set_current_panel()), so the next idle event retries at once.
     if (m_gl_lost) {
         const auto now = std::chrono::steady_clock::now();
         if (!_is_shown_on_screen() || now < m_gl_next_recovery_attempt)
@@ -3240,6 +3262,14 @@ void GLCanvas3D::render_thumbnail(ThumbnailData& thumbnail_data, unsigned int w,
                                   bool                      for_picking,
                                   bool                      ban_light)
 {
+    // Thumbnails are drawn into an off-screen framebuffer of whichever context is current. With none current, or
+    // from a lost canvas that dropped its volumes, the read-back would be a blank image: reset the thumbnail instead,
+    // so a cached image of an older scene isn't exported as current. Plate thumbnails are drawn again on recovery
+    // (Plater::on_gl_context_recovered()), and a file exported meanwhile goes without one.
+    if (m_gl_lost || !gl_context_bound()) {
+        thumbnail_data.reset();
+        return;
+    }
     GLShaderProgram* shader = nullptr;
     if (for_picking)
         shader = wxGetApp().get_shader("flat");
@@ -3279,6 +3309,11 @@ void GLCanvas3D::render_thumbnail(ThumbnailData& thumbnail_data, unsigned int w,
                                   bool                      for_picking,
                                   bool                      ban_light)
 {
+    // see the overload above
+    if (m_gl_lost || !gl_context_bound()) {
+        thumbnail_data.reset();
+        return;
+    }
     GLShaderProgram* shader = nullptr;
     if (for_picking)
         shader = wxGetApp().get_shader("flat");
@@ -3306,6 +3341,11 @@ void GLCanvas3D::render_thumbnail(ThumbnailData& thumbnail_data, unsigned int w,
 
 void GLCanvas3D::render_calibration_thumbnail(ThumbnailData& thumbnail_data, unsigned int w, unsigned int h, const ThumbnailsParams& thumbnail_params)
 {
+    // see render_thumbnail()
+    if (m_gl_lost || !gl_context_bound()) {
+        thumbnail_data.reset();
+        return;
+    }
     //load current plate gcode
     m_gcode_viewer.render_calibration_thumbnail(thumbnail_data, w, h, thumbnail_params,
         wxGetApp().plater()->get_partplate_list(), wxGetApp().get_opengl_manager());
@@ -3483,9 +3523,43 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
     _set_current();
     if (m_gl_lost) {
         // The model may have changed under the volumes and the selection (a new project, a deleted object) and the
-        // volumes are rebuilt only once the context binds again: drop the selection, whose indices the object list
-        // would otherwise resolve against the changed model.
+        // volumes are rebuilt only once the context binds again (Plater::on_gl_context_recovered()). Drop both now:
+        // volume walks meanwhile (check_volumes_outside_state() indexes model.objects by a volume's object index) and
+        // the object list would resolve their stale indices against the changed model. An open gizmo closes first
+        // (Measure keeps raycasters of the selected volumes). When the object the gizmo cached is still in the model
+        // at the selection's index and every selected volume still names the same model volume and instance, the gizmo
+        // closes against the intact selection, so it writes its edits back (Brim Ears stores its points on close).
+        // Otherwise a deletion may have freed the cached object or a selected part: the gizmo data is refreshed from an
+        // empty selection before closing, because closing writes to the cached object and updates every gizmo's data
+        // (Flatten indexes model.objects by the selection's object index, the manipulation panel indexes the selected
+        // volume). The selection is cleared after that; it resets the colors of the volumes it lists, whose GL buffers
+        // go on the next bind.
+        if (m_gizmos.get_current_type() != GLGizmosManager::Undefined) {
+            const ModelObject* cached  = m_gizmos.get_cached_model_object();
+            const int          obj_idx = m_selection.get_object_idx();
+            bool alive = cached != nullptr && obj_idx >= 0 && obj_idx < int(m_model->objects.size()) &&
+                         m_model->objects[obj_idx] == cached;
+            for (unsigned int idx : m_selection.get_volume_idxs()) {
+                if (!alive)
+                    break;
+                const GLVolume* v  = idx < m_volumes.volumes.size() ? m_volumes.volumes[idx] : nullptr;
+                const int       vi = v != nullptr ? v->volume_idx() : -1;
+                const int       ii = v != nullptr ? v->instance_idx() : -1;
+                alive = v != nullptr && v->object_idx() == obj_idx && vi >= 0 && vi < int(cached->volumes.size()) &&
+                        ii >= 0 && ii < int(cached->instances.size()) &&
+                        v->geometry_id.first == cached->volumes[vi]->id().id &&
+                        v->geometry_id.second == cached->instances[ii]->id().id;
+            }
+            if (!alive) {
+                m_selection.clear(false);
+                m_gizmos.update_data();
+            }
+            exit_gizmo();
+        }
         m_selection.clear(false);
+        m_hover_volume_idxs.clear();
+        m_scene_raycaster.remove_raycasters(SceneRaycaster::EType::Volume);
+        m_volumes.clear();
         return;
     }
 
@@ -4074,8 +4148,7 @@ void GLCanvas3D::load_gcode_preview(const GCodeProcessorResult& gcode_result, co
     // while it stays lost the preview stays off and the slice result (the written G-code) is not touched.
     if (m_gl_lost && !_try_recover_gl())
         return;
-    _set_current();
-    if (m_gl_lost)
+    if (!make_current_for_gl_work())
         return;
 
     PartPlateList& partplate_list = wxGetApp().plater()->get_partplate_list();
@@ -7908,9 +7981,8 @@ bool GLCanvas3D::_update_imgui_select_plate_toolbar()
     bool result = true;
     if (!m_sel_plate_toolbar.is_enabled() || m_sel_plate_toolbar.is_render_finish) return false;
 
-    make_current_for_postinit();
     // the item textures below are GL uploads
-    if (m_gl_lost)
+    if (!make_current_for_gl_work())
         return false;
     _update_select_plate_toolbar_stats_item();
 
@@ -8068,6 +8140,9 @@ void report_gl_loss_to_user(const GLBindResult& result)
         caption = _L("Graphics memory exhausted");
         message = _L("The graphics card ran out of memory while drawing the 3D view, so the view is paused.") + "\n\n" + outcome + "\n\n" +
                   _L("Closing other programs that use the graphics card frees memory.");
+    } else if (result.x_error == 0) {
+        caption = _L("Graphics error");
+        message = _L("The graphics system could not draw the 3D view, so the view is paused.") + "\n\n" + outcome;
     } else {
         caption = _L("Graphics error");
         message = wxString::Format(_L("The graphics system reported an error (%s) while drawing the 3D view, so the view is paused."),
@@ -8090,7 +8165,9 @@ bool GLCanvas3D::_set_current()
         return false;
 
     const GLBindResult result = bind_gl_context(*m_canvas, *m_context);
-    if (result.x_error != 0)
+    // A failed bind to a realized canvas is a loss even without an X error: a temporary handler of another component
+    // (GStreamer's ximagesink) may have swallowed it, and the context is not current on any canvas afterwards.
+    if (!result.bound && (result.x_error != 0 || result.drawable))
         _on_gl_bind_failed(result);
     return result.bound;
 }
@@ -8098,9 +8175,12 @@ bool GLCanvas3D::_set_current()
 void GLCanvas3D::_on_gl_bind_failed(const GLBindResult& result)
 {
     m_gl_lost = true;
-    BOOST_LOG_TRIVIAL(error) << "GL context lost: binding it to the canvas of type " << static_cast<int>(m_canvas_type)
-                             << " raised X error " << result.x_error << " (" << result.x_error_text
+    BOOST_LOG_TRIVIAL(error) << "GL context lost: binding it to the canvas of type " << static_cast<int>(m_canvas_type) << " failed, X error "
+                             << result.x_error << " (" << (result.x_error != 0 ? result.x_error_text : "none captured")
                              << "); the canvas issues no GL calls until a bind succeeds again";
+    // The log file is written in blocks, without auto-flush: a log copied while Orca runs would otherwise end before
+    // the loss and the retries, as if the retries had stopped.
+    flush_logs();
     if (m_destroying)
         return;
     // Mouse and idle events do not draw a lost canvas, so nothing else would try the bind again.
@@ -8121,8 +8201,9 @@ bool GLCanvas3D::_try_recover_gl()
 
     const GLBindResult result = bind_gl_context(*m_canvas, *m_context);
     if (!result.bound) {
-        BOOST_LOG_TRIVIAL(warning) << "GL context still lost: the bind raised X error " << result.x_error << " (" << result.x_error_text
-                                   << ")";
+        BOOST_LOG_TRIVIAL(warning) << "GL context still lost: binding it to the canvas of type " << static_cast<int>(m_canvas_type)
+                                   << " raised X error " << result.x_error << " (" << result.x_error_text << ")";
+        flush_logs(); // see _on_gl_bind_failed()
         return false;
     }
 
@@ -8130,7 +8211,8 @@ bool GLCanvas3D::_try_recover_gl()
     m_gl_next_recovery_attempt = {};
     m_gl_recovery_timer.Stop();
     m_dirty = true;
-    BOOST_LOG_TRIVIAL(info) << "GL context recovered: the canvas of type " << static_cast<int>(m_canvas_type) << " is bound again";
+    BOOST_LOG_TRIVIAL(warning) << "GL context recovered: the canvas of type " << static_cast<int>(m_canvas_type) << " is bound again";
+    flush_logs(); // see _on_gl_bind_failed()
     // Scene reloads and preview loads made while the canvas was lost returned before touching it: redo them outside
     // of the caller, which may be a render or a load in progress. Queued on the canvas window, whose destructor drops
     // the pending call: the owners (View3D, Preview, AssembleView) delete this object and the window together.

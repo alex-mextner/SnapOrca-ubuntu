@@ -608,7 +608,7 @@ private:
     // Screen is only refreshed from the OnIdle handler if it is dirty.
     bool m_dirty;
     bool m_initialized;
-    // The context bind raised an X error. Set by _on_gl_bind_failed(), cleared by _try_recover_gl().
+    // The context bind to this realized canvas failed. Set by _on_gl_bind_failed(), cleared by _try_recover_gl().
     bool m_gl_lost{false};
     // render() retries the bind of a lost canvas no earlier than this.
     std::chrono::steady_clock::time_point m_gl_next_recovery_attempt;
@@ -1218,9 +1218,13 @@ public:
     Vec3d _mouse_to_3d(const Point& mouse_pos, float* z = nullptr);
 
     bool make_current_for_postinit();
+    // Binds the context for GL work outside render() (thumbnails, plate toolbar, preview loads): false when that work
+    // must be skipped because the canvas is lost or no context is current. A canvas not realized yet cannot be bound,
+    // its work then goes to the shared context still current on another canvas.
+    bool make_current_for_gl_work();
 
-    // True after the context bind failed with an X error (BadAlloc: the X server or the GPU driver is out of
-    // graphics memory). A lost canvas issues no GL calls and draws nothing until _try_recover_gl() succeeds.
+    // True after the context bind failed (X BadAlloc: the X server or the GPU driver is out of graphics memory).
+    // A lost canvas issues no GL calls and draws nothing until _try_recover_gl() succeeds.
     bool is_gl_lost() const { return m_gl_lost; }
     // Binds the shared context on this canvas to free GL objects. Unlike _set_current() a failure only returns false
     // and does not mark the canvas lost, so it is safe to probe other canvases while handling a loss.
@@ -1293,8 +1297,8 @@ private:
     //bool _init_view_toolbar();
     bool _init_collapse_toolbar();
 
-    // Binds the shared GL context to this canvas. Returns false while the canvas is lost (see m_gl_lost) and
-    // marks it lost when the bind raises an X error; a bind that fails without one (canvas not realized yet) only returns false.
+    // Binds the shared GL context to this canvas. Returns false while the canvas is lost (see m_gl_lost) and marks it
+    // lost when the bind fails, with or without an X error; a canvas not realized yet only returns false.
     bool _set_current();
     // Bind failed with `result.x_error`: mark the canvas lost, free the toolpath buffers, switch the preview to the
     // skip-toolpaths mode and tell the user once.

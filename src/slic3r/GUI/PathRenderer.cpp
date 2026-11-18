@@ -2,6 +2,7 @@
 #include "PathData.hpp"
 #include "GLShader.hpp"
 #include "GLModel.hpp"     // diamond() marker template
+#include "GLBindTrap.hpp"
 #include "GUI_App.hpp"
 #include "Plater.hpp"
 #include "Camera.hpp"
@@ -112,7 +113,7 @@ void LutTexture::Bind(unsigned int stage) const
 void LutTexture::Reset()
 {
     if (_textureId != 0) {
-        glsafe(::glDeleteTextures(1, &_textureId));
+        delete_gl_textures(1, &_textureId);
         _textureId = 0;
     }
     _texelCount = 0;
@@ -236,11 +237,11 @@ void InstanceMesh::DrawInstanced(unsigned int instanceCount)
 void InstanceMesh::Reset()
 {
     if (_vertexBufferId != 0) {
-        glsafe(::glDeleteBuffers(1, &_vertexBufferId));
+        delete_gl_buffers(1, &_vertexBufferId);
         _vertexBufferId = 0;
     }
     if (_indexBufferId != 0) {
-        glsafe(::glDeleteBuffers(1, &_indexBufferId));
+        delete_gl_buffers(1, &_indexBufferId);
         _indexBufferId = 0;
     }
     _indexCount = 0;

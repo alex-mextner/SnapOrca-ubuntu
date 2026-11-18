@@ -3,6 +3,7 @@
 
 #include "3DScene.hpp"
 #include "GUI_App.hpp"
+#include "GLBindTrap.hpp"
 #include "GLShader.hpp"
 #include "OpenGLManager.hpp"
 
@@ -586,11 +587,11 @@ void GLModel::reset()
 
     // release gpu memory
     if (m_render_data.ibo_id > 0) {
-        glsafe(::glDeleteBuffers(1, &m_render_data.ibo_id));
+        delete_gl_buffers(1, &m_render_data.ibo_id);
         m_render_data.ibo_id = 0;
     }
     if (m_render_data.vbo_id > 0) {
-        glsafe(::glDeleteBuffers(1, &m_render_data.vbo_id));
+        delete_gl_buffers(1, &m_render_data.vbo_id);
         m_render_data.vbo_id = 0;
     }
 
@@ -780,7 +781,7 @@ void GLModel::DeleteVao()
     if (m_render_data.vao_id == 0)
         return;
 
-    glsafe(::glDeleteVertexArrays(static_cast<GLsizei>(1), &m_render_data.vao_id));
+    delete_gl_vertex_arrays(1, &m_render_data.vao_id);
     m_render_data.vao_id = 0;
 }
 

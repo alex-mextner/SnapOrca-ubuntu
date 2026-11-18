@@ -739,7 +739,7 @@ void Preview::load_print_as_fff(bool keep_z_range, bool only_gcode)
             //BBS: add more log
             BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": will load gcode_preview from result, moves count %1%") % m_gcode_result->moves.size();
             //BBS: add only gcode mode
-            m_canvas->load_gcode_preview(*m_gcode_result, colors, only_gcode, m_skip_toolpath_preview);
+            m_canvas->load_gcode_preview(*m_gcode_result, colors, only_gcode, m_skip_toolpath_causes != 0);
             //BBS show sliders
             show_moves_sliders();
 

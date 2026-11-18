@@ -16,3 +16,4 @@ lint_checks:
       - plater.cpp
       - glcanvas3d.cpp
       - gui_app.cpp
+      - gcodeviewer.cpp
