@@ -357,6 +357,11 @@ public:
     // rebuild the gcode preview with the current pipeline preference
     void reload_gcode_preview();
     void refresh_print();
+    // A canvas lost its GL context (the bind raised an X error, see GLCanvas3D::_on_gl_bind_failed): later previews
+    // skip the toolpath GPU buffers and the buffers of the loaded one are freed through a canvas that still binds.
+    void on_gl_context_lost();
+    // `canvas` binds again after a loss: redo the scene reload or preview load that were skipped meanwhile.
+    void on_gl_context_recovered(GLCanvas3D& canvas);
 
     void update_nozzle_settings();
 

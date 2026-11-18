@@ -58,6 +58,7 @@ namespace GUI {
 
 class Bed3D;
 class GLSubTextureBindRenderer;
+struct GLBindResult;
 class GLToolbarBackgroundTextureCache;
 class PartPlateList;
 
@@ -607,6 +608,14 @@ private:
     // Screen is only refreshed from the OnIdle handler if it is dirty.
     bool m_dirty;
     bool m_initialized;
+    // The context bind raised an X error. Set by _on_gl_bind_failed(), cleared by _try_recover_gl().
+    bool m_gl_lost{false};
+    // render() retries the bind of a lost canvas no earlier than this.
+    std::chrono::steady_clock::time_point m_gl_next_recovery_attempt;
+    // Runs while the canvas is lost and redraws it, which retries the bind.
+    wxTimer m_gl_recovery_timer;
+    // Set by the destructor: a bind that fails during cleanup only marks the canvas lost.
+    bool m_destroying{false};
     //BBS: add flag to controll rendering
     bool m_render_preview{ true };
     bool m_enable_render { true };
@@ -1210,6 +1219,13 @@ public:
 
     bool make_current_for_postinit();
 
+    // True after the context bind failed with an X error (BadAlloc: the X server or the GPU driver is out of
+    // graphics memory). A lost canvas issues no GL calls and draws nothing until _try_recover_gl() succeeds.
+    bool is_gl_lost() const { return m_gl_lost; }
+    // Binds the shared context on this canvas to free GL objects. Unlike _set_current() a failure only returns false
+    // and does not mark the canvas lost, so it is safe to probe other canvases while handling a loss.
+    bool make_current_for_gl_release();
+
 private:
     bool _is_shown_on_screen() const;
 
@@ -1277,7 +1293,14 @@ private:
     //bool _init_view_toolbar();
     bool _init_collapse_toolbar();
 
+    // Binds the shared GL context to this canvas. Returns false while the canvas is lost (see m_gl_lost) and
+    // marks it lost when the bind raises an X error; a bind that fails without one (canvas not realized yet) only returns false.
     bool _set_current();
+    // Bind failed with `result.x_error`: mark the canvas lost, free the toolpath buffers, switch the preview to the
+    // skip-toolpaths mode and tell the user once.
+    void _on_gl_bind_failed(const GLBindResult& result);
+    // One bind attempt for a lost canvas, made by render() (throttled) and when new data is loaded: clears m_gl_lost when it works again.
+    bool _try_recover_gl();
     void _resize(unsigned int w, unsigned int h);
 
     //BBS: add part plate related logic

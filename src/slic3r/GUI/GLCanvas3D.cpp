@@ -24,6 +24,7 @@
 #include "GUI_Preview.hpp"
 #include "OpenGLManager.hpp"
 #include "Plater.hpp"
+#include "GLBindTrap.hpp"
 #include "MainFrame.hpp"
 #include "GUI_App.hpp"
 #include "GUI_ObjectList.hpp"
@@ -1557,6 +1558,7 @@ GLCanvas3D::GLCanvas3D(wxGLCanvas* canvas, Bed3D &bed)
 #endif // ENABLE_RETINA_GL
     }
     m_timer_set_color.Bind(wxEVT_TIMER, &GLCanvas3D::on_set_color_timer, this);
+    m_gl_recovery_timer.Bind(wxEVT_TIMER, [this](wxTimerEvent&) { _refresh_if_shown_on_screen(); });
     load_arrange_settings();
 
     m_selection.set_volumes(&m_volumes.volumes);
@@ -1572,6 +1574,9 @@ GLCanvas3D::GLCanvas3D(wxGLCanvas* canvas, Bed3D &bed)
 
 GLCanvas3D::~GLCanvas3D()
 {
+    // The cleanup below binds the context; a failure then must not call into the Plater, which is already destroyed.
+    m_destroying = true;
+    m_gl_recovery_timer.Stop();
     const bool hasSelectionHighlightResources =
         m_selectionHighlightResources.fullResolutionMaskFramebuffer != 0 ||
         m_selectionHighlightResources.fullResolutionMaskTexture != 0 ||
@@ -2372,6 +2377,8 @@ void GLCanvas3D::reset_volumes(ResetVolumesMode mode)
         return;
 
     _set_current();
+    if (m_gl_lost)
+        return;
 
     if (mode == ResetVolumesMode::Normal)
         m_selection.clear();
@@ -2924,6 +2931,18 @@ void GLCanvas3D::render(bool only_init)
     if (!m_enable_render)
         return;
 
+    // A lost canvas draws nothing. Graphics memory is often short only while another program peaks, so the bind is
+    // retried by m_gl_recovery_timer and by render requests (expose, resize), at most twice a second because a failing
+    // bind costs an X round trip.
+    if (m_gl_lost) {
+        const auto now = std::chrono::steady_clock::now();
+        if (!_is_shown_on_screen() || now < m_gl_next_recovery_attempt)
+            return;
+        m_gl_next_recovery_attempt = now + std::chrono::milliseconds(500);
+        if (!_try_recover_gl())
+            return;
+    }
+
     // ensures this canvas is current and initialized
     if (!_is_shown_on_screen() || !_set_current() || !wxGetApp().init_opengl())
         return;
@@ -3459,7 +3478,16 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
     if (!m_initialized)
         return;
 
+    if (m_gl_lost)
+        _try_recover_gl();
     _set_current();
+    if (m_gl_lost) {
+        // The model may have changed under the volumes and the selection (a new project, a deleted object) and the
+        // volumes are rebuilt only once the context binds again: drop the selection, whose indices the object list
+        // would otherwise resolve against the changed model.
+        m_selection.clear(false);
+        return;
+    }
 
     m_hover_volume_idxs.clear();
 
@@ -4041,6 +4069,15 @@ void GLCanvas3D::set_shell_transparence(float alpha){
 //BBS: add only gcode mode
 void GLCanvas3D::load_gcode_preview(const GCodeProcessorResult& gcode_result, const std::vector<std::string>& str_tool_colors, bool only_gcode, bool skip_toolpaths)
 {
+    // The toolpath buffers are uploaded below into the shared context, which used to be whichever canvas was bound last.
+    // A lost canvas gets one bind attempt here (the user may have closed other GPU programs before slicing again);
+    // while it stays lost the preview stays off and the slice result (the written G-code) is not touched.
+    if (m_gl_lost && !_try_recover_gl())
+        return;
+    _set_current();
+    if (m_gl_lost)
+        return;
+
     PartPlateList& partplate_list = wxGetApp().plater()->get_partplate_list();
     PartPlate* plate = partplate_list.get_curr_plate();
     const std::vector<BoundingBoxf3>& exclude_bounding_box = plate->get_exclude_areas();
@@ -4077,6 +4114,8 @@ void GLCanvas3D::load_sla_preview()
     const SLAPrint* print = sla_print();
     if (m_canvas != nullptr && print != nullptr) {
         _set_current();
+        if (m_gl_lost)
+            return;
 	    // Release OpenGL data before generating new data.
 	    reset_volumes();
         _load_sla_shells();
@@ -7870,6 +7909,9 @@ bool GLCanvas3D::_update_imgui_select_plate_toolbar()
     if (!m_sel_plate_toolbar.is_enabled() || m_sel_plate_toolbar.is_render_finish) return false;
 
     make_current_for_postinit();
+    // the item textures below are GL uploads
+    if (m_gl_lost)
+        return false;
     _update_select_plate_toolbar_stats_item();
 
     m_sel_plate_toolbar.del_all_item();
@@ -8006,14 +8048,113 @@ bool GLCanvas3D::_init_collapse_toolbar()
     return wxGetApp().plater()->init_collapse_toolbar(_get_shared_toolbar_background_texture());
 }
 
+namespace {
+// Reported once per run: memory that runs short at a peak of another program can make the bind fail again and again,
+// and every later loss is in the log.
+bool s_gl_loss_reported = false;
+
+void report_gl_loss_to_user(const GLBindResult& result)
+{
+    if (s_gl_loss_reported)
+        return;
+    s_gl_loss_reported = true;
+
+    const wxString outcome = _L("Your project is kept, and slicing and G-code export still work.") + "\n\n" +
+                             _L("The 3D view comes back by itself as soon as the graphics card can draw it again; until then "
+                                "the G-code preview leaves out the toolpaths to save graphics memory.");
+    wxString       caption;
+    wxString       message;
+    if (result.out_of_memory) {
+        caption = _L("Graphics memory exhausted");
+        message = _L("The graphics card ran out of memory while drawing the 3D view, so the view is paused.") + "\n\n" + outcome + "\n\n" +
+                  _L("Closing other programs that use the graphics card frees memory.");
+    } else {
+        caption = _L("Graphics error");
+        message = wxString::Format(_L("The graphics system reported an error (%s) while drawing the 3D view, so the view is paused."),
+                                   wxString::FromUTF8(result.x_error_text.c_str())) +
+                  "\n\n" + outcome;
+    }
+
+    // The bind can fail deep inside a paint, idle or slicing event handler: show the dialog (a modal event loop)
+    // from the event queue. It is a plain wx dialog because ImGui needs the GL context that just failed.
+    wxGetApp().CallAfter([caption, message]() {
+        wxMessageDialog dialog(wxGetApp().mainframe, message, caption, wxOK | wxICON_WARNING);
+        dialog.ShowModal();
+    });
+}
+} // namespace
+
 bool GLCanvas3D::_set_current()
 {
-    return m_context != nullptr && m_canvas->SetCurrent(*m_context);
+    if (m_context == nullptr || m_gl_lost)
+        return false;
+
+    const GLBindResult result = bind_gl_context(*m_canvas, *m_context);
+    if (result.x_error != 0)
+        _on_gl_bind_failed(result);
+    return result.bound;
+}
+
+void GLCanvas3D::_on_gl_bind_failed(const GLBindResult& result)
+{
+    m_gl_lost = true;
+    BOOST_LOG_TRIVIAL(error) << "GL context lost: binding it to the canvas of type " << static_cast<int>(m_canvas_type)
+                             << " raised X error " << result.x_error << " (" << result.x_error_text
+                             << "); the canvas issues no GL calls until a bind succeeds again";
+    if (m_destroying)
+        return;
+    // Mouse and idle events do not draw a lost canvas, so nothing else would try the bind again.
+    m_gl_recovery_timer.Start(1000);
+
+    if (Plater* plater = wxGetApp().plater())
+        plater->on_gl_context_lost();
+
+    report_gl_loss_to_user(result);
+}
+
+bool GLCanvas3D::_try_recover_gl()
+{
+    if (!m_gl_lost)
+        return true;
+    if (m_context == nullptr || m_canvas == nullptr)
+        return false;
+
+    const GLBindResult result = bind_gl_context(*m_canvas, *m_context);
+    if (!result.bound) {
+        BOOST_LOG_TRIVIAL(warning) << "GL context still lost: the bind raised X error " << result.x_error << " (" << result.x_error_text
+                                   << ")";
+        return false;
+    }
+
+    m_gl_lost                  = false;
+    m_gl_next_recovery_attempt = {};
+    m_gl_recovery_timer.Stop();
+    m_dirty = true;
+    BOOST_LOG_TRIVIAL(info) << "GL context recovered: the canvas of type " << static_cast<int>(m_canvas_type) << " is bound again";
+    // Scene reloads and preview loads made while the canvas was lost returned before touching it: redo them outside
+    // of the caller, which may be a render or a load in progress. Queued on the canvas window, whose destructor drops
+    // the pending call: the owners (View3D, Preview, AssembleView) delete this object and the window together.
+    m_canvas->CallAfter([this]() {
+        if (Plater* plater = wxGetApp().plater())
+            plater->on_gl_context_recovered(*this);
+    });
+    return true;
+}
+
+bool GLCanvas3D::make_current_for_gl_release()
+{
+    if (m_gl_lost || m_context == nullptr || m_canvas == nullptr)
+        return false;
+    return bind_gl_context(*m_canvas, *m_context).bound;
 }
 
 void GLCanvas3D::_resize(unsigned int w, unsigned int h)
 {
     if (m_canvas == nullptr && m_context == nullptr)
+        return;
+
+    // A lost canvas must not reach the font upload of ImGuiWrapper::set_scaling() below.
+    if (m_gl_lost)
         return;
 
     const std::array<unsigned int, 2> new_size = { w, h };
@@ -11033,6 +11174,8 @@ void GLCanvas3D::_update_sla_shells_outside_state()
 void GLCanvas3D::_set_warning_notification_if_needed(EWarning warning)
 {
     _set_current();
+    if (m_gl_lost)
+        return;
     bool show = false;
     if (!m_volumes.empty()) {
         show = _is_any_volume_outside();

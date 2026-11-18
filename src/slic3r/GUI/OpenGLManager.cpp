@@ -367,7 +367,21 @@ wxGLCanvas* OpenGLManager::create_wxglcanvas(wxWindow& parent)
 //        std::cout << "Multisample " << (can_multisample() ? "enabled" : "disabled") << std::endl;
     }
 
-    const std::vector<int> attribs = gl_canvas_attrib_list(can_multisample());
+    bool canvas_multisample = can_multisample();
+#ifdef __WXGTK__
+    // The window of a 4x multisampled RGBA8 + D24S8 canvas keeps about 40 bytes per device pixel in graphics memory,
+    // against 12 without the samples. On a display scaled by 2 or more every logical pixel is drawn with four or more
+    // device pixels already, so the samples add little to the picture and most of the canvas' memory: on a 5120x2880
+    // screen with NVIDIA, Orca held 524 MiB of graphics memory after slicing a small part with them and 238 MiB without
+    // (issue #52). When the driver cannot back a canvas window, the next context bind fails with BadAlloc. The off-screen
+    // thumbnail framebuffers keep their samples (can_multisample()); other platforms keep the samples too, untested there.
+    const double scale = parent.GetContentScaleFactor();
+    if (canvas_multisample && scale >= 2.0) {
+        canvas_multisample = false;
+        BOOST_LOG_TRIVIAL(info) << "3D canvas without multisampling: the display is scaled by " << scale;
+    }
+#endif
+    const std::vector<int> attribs = gl_canvas_attrib_list(canvas_multisample);
     return new wxGLCanvas(&parent, wxID_ANY, attribs.data(), wxDefaultPosition, wxDefaultSize, wxWANTS_CHARS);
 }
 

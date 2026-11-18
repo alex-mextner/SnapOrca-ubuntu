@@ -1098,6 +1098,10 @@ void GUI_App::post_init()
         }
         else {
             BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << "Found glcontext not ready, postpone the init";
+            // The bind failed with an X error (graphics memory exhausted): render() retries it and initializes the
+            // canvas once it works, which it cannot do while rendering stays disabled.
+            if (plater_->canvas3D()->is_gl_lost())
+                plater_->canvas3D()->enable_render(true);
         }
 //#endif
         // A URL open already in flight loads its own project and has already selected the 3D

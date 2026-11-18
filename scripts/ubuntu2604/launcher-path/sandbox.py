@@ -59,9 +59,12 @@ def main():
     os.makedirs(config_target, exist_ok=True)
     os.makedirs(cache_target, exist_ok=True)
 
-    bwrap = ["bwrap", "--unshare-all"]
-    if args.net:
-        bwrap.append("--share-net")
+    # Everything --unshare-all unshares except IPC: XWayland attaches the app's MIT-SHM segments by SysV id, which a
+    # private IPC namespace makes unresolvable, so GTK's first ShmPutImage fails with BadValue and GDK exits the app.
+    # The desktop launcher does not separate IPC either.
+    bwrap = ["bwrap", "--unshare-user-try", "--unshare-pid", "--unshare-uts", "--unshare-cgroup-try"]
+    if not args.net:
+        bwrap.append("--unshare-net")
     bwrap += ["--clearenv", "--ro-bind", "/", "/", "--dev", "/dev", "--dev-bind", "/dev/dri", "/dev/dri"]
     for node in ("nvidia0", "nvidiactl", "nvidia-uvm", "nvidia-uvm-tools", "nvidia-modeset"):
         if os.path.exists(f"/dev/{node}"):

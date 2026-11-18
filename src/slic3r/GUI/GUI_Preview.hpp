@@ -169,6 +169,7 @@ public:
     void set_reload_paint_after_background_process_apply(bool flag) { m_reload_paint_after_background_process_apply = flag; }
     bool get_reload_paint_after_background_process_apply() { return m_reload_paint_after_background_process_apply; }
     void set_skip_toolpath_preview(bool v) { m_skip_toolpath_preview = v; }
+    bool get_skip_toolpath_preview() const { return m_skip_toolpath_preview; }
     GCodeProcessorResult* get_gcode_result() { return m_gcode_result; }
 
 private:
