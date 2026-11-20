@@ -46,6 +46,7 @@ private:
         std::vector<VramOffload::Consumer> consumers;
     };
 
+    struct Mailbox;     // worker thread -> UI thread posting, closed with the controller
     struct ProbeShared; // worker thread -> UI thread hand-over of the probe result
     static bool needs_offer(const ProbeResult& probe) { return probe.gpu_known && !probe.consumers.empty(); }
 
@@ -70,8 +71,8 @@ private:
     // The preview was entered while the leases were being restored: probe again when that is done.
     bool                         m_await_release{false};
     int                          m_release_attempts{0};
-    // Cleared by the destructor: results of worker threads that arrive afterwards are dropped.
-    std::shared_ptr<std::atomic_bool> m_alive{std::make_shared<std::atomic_bool>(true)};
+    // How worker threads reach the UI thread; closed by the destructor (see the definition).
+    std::shared_ptr<Mailbox>     m_mailbox;
 };
 
 }} // namespace Slic3r::GUI

@@ -381,7 +381,32 @@ template<class Fn> bool load_symbol(void* library, const char* name, Fn& out)
 
 } // namespace
 
-std::optional<GpuSnapshot> probe_gpu(const char* library_name, std::string* why)
+std::optional<std::size_t> choose_render_gpu(const std::vector<GpuSnapshot>& gpus, unsigned int self_pid)
+{
+    if (gpus.empty())
+        return std::nullopt;
+    std::vector<std::size_t> graphics_matches, compute_matches;
+    if (self_pid != 0) {
+        for (std::size_t i = 0; i < gpus.size(); ++i) {
+            const GpuSnapshot& gpu = gpus[i];
+            if (std::find(gpu.graphics_pids.begin(), gpu.graphics_pids.end(), self_pid) != gpu.graphics_pids.end())
+                graphics_matches.push_back(i);
+            if (std::any_of(gpu.processes.begin(), gpu.processes.end(), [&](const GpuProcess& p) { return p.pid == self_pid; }))
+                compute_matches.push_back(i);
+        }
+    }
+    // A graphics context is the render path itself; a compute context only a fallback. At either tier exactly one GPU may
+    // match: with several, the order of enumeration would decide and the wrong GPU's free memory would be judged.
+    if (!graphics_matches.empty())
+        return graphics_matches.size() == 1 ? std::optional<std::size_t>(graphics_matches.front()) : std::nullopt;
+    if (!compute_matches.empty())
+        return compute_matches.size() == 1 ? std::optional<std::size_t>(compute_matches.front()) : std::nullopt;
+    if (gpus.size() == 1)
+        return 0;
+    return std::nullopt;
+}
+
+std::optional<GpuSnapshot> probe_gpu(const char* library_name, std::string* why, unsigned int self_pid)
 {
     auto fail = [why](const std::string& reason) -> std::optional<GpuSnapshot> {
         if (why != nullptr)
@@ -394,61 +419,90 @@ std::optional<GpuSnapshot> probe_gpu(const char* library_name, std::string* why)
     if (library == nullptr)
         return fail(std::string("cannot load ") + library_name);
 
-    NvmlReturn (*init)()                                        = nullptr;
-    NvmlReturn (*shutdown)()                                    = nullptr;
-    NvmlReturn (*handle_by_index)(unsigned int, NvmlDevice*)    = nullptr;
-    NvmlReturn (*memory_info)(NvmlDevice, NvmlMemory*)          = nullptr;
-    NvmlReturn (*processes)(NvmlDevice, unsigned int*, NvmlProcessInfo*) = nullptr;
+    using ProcessList = NvmlReturn (*)(NvmlDevice, unsigned int*, NvmlProcessInfo*);
+    NvmlReturn (*init)()                                     = nullptr;
+    NvmlReturn (*shutdown)()                                 = nullptr;
+    NvmlReturn (*device_count)(unsigned int*)                = nullptr;
+    NvmlReturn (*handle_by_index)(unsigned int, NvmlDevice*) = nullptr;
+    NvmlReturn (*memory_info)(NvmlDevice, NvmlMemory*)       = nullptr;
+    ProcessList compute_processes                            = nullptr;
+    ProcessList graphics_processes                           = nullptr;
     if (!load_symbol(library, "nvmlInit_v2", init) || !load_symbol(library, "nvmlShutdown", shutdown) ||
+        !load_symbol(library, "nvmlDeviceGetCount_v2", device_count) ||
         !load_symbol(library, "nvmlDeviceGetHandleByIndex_v2", handle_by_index) ||
         !load_symbol(library, "nvmlDeviceGetMemoryInfo", memory_info) ||
-        !load_symbol(library, "nvmlDeviceGetComputeRunningProcesses_v3", processes))
+        !load_symbol(library, "nvmlDeviceGetComputeRunningProcesses_v3", compute_processes))
         return fail(std::string(library_name) + " lacks a required symbol");
+    // Optional (NVML of driver 510+): without it a single GPU is still identified, several are not.
+    load_symbol(library, "nvmlDeviceGetGraphicsRunningProcesses_v3", graphics_processes);
 
     if (init() != NVML_SUCCESS)
         return fail("nvmlInit_v2 failed");
 
-    std::optional<GpuSnapshot> snapshot;
-    std::string                reason = "NVML query failed";
-    NvmlDevice                 device = nullptr;
-    NvmlMemory                 memory{};
-    if (handle_by_index(0, &device) == NVML_SUCCESS && memory_info(device, &memory) == NVML_SUCCESS) {
-        GpuSnapshot result;
-        result.total_bytes = memory.total;
-        result.free_bytes  = memory.free;
-        // The process list can grow between the size query and the fetch: retry with the size NVML reports.
-        unsigned int                 count = 0;
-        std::vector<NvmlProcessInfo> infos;
-        bool                         listed = false;
-        for (int attempt = 0; attempt < 4 && !listed; ++attempt) {
-            const NvmlReturn rc = processes(device, &count, infos.empty() ? nullptr : infos.data());
+    // The process list can grow between the size query and the fetch: retry with the size NVML reports.
+    const auto list_processes = [](ProcessList fn, NvmlDevice device, std::vector<NvmlProcessInfo>& infos) {
+        unsigned int count = 0;
+        infos.clear();
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            const NvmlReturn rc = fn(device, &count, infos.empty() ? nullptr : infos.data());
             if (rc == NVML_SUCCESS) {
                 infos.resize(count);
-                listed = true;
-            } else if (rc == NVML_ERROR_INSUFFICIENT_SIZE) {
-                infos.assign(static_cast<std::size_t>(count) + 8, NvmlProcessInfo{});
-                count = static_cast<unsigned int>(infos.size());
-            } else {
+                return true;
+            }
+            if (rc != NVML_ERROR_INSUFFICIENT_SIZE)
+                break;
+            infos.assign(static_cast<std::size_t>(count) + 8, NvmlProcessInfo{});
+            count = static_cast<unsigned int>(infos.size());
+        }
+        return false;
+    };
+
+    std::vector<GpuSnapshot> gpus;
+    std::string              reason = "NVML query failed";
+    unsigned int             count  = 0;
+    if (device_count(&count) == NVML_SUCCESS) {
+        bool ok = true;
+        for (unsigned int index = 0; index < count && ok; ++index) {
+            NvmlDevice                   device = nullptr;
+            NvmlMemory                   memory{};
+            std::vector<NvmlProcessInfo> infos;
+            if (handle_by_index(index, &device) != NVML_SUCCESS || memory_info(device, &memory) != NVML_SUCCESS) {
+                ok = false;
                 break;
             }
-        }
-        if (listed) {
+            GpuSnapshot gpu;
+            gpu.index       = index;
+            gpu.total_bytes = memory.total;
+            gpu.free_bytes  = memory.free;
+            if (!list_processes(compute_processes, device, infos)) {
+                reason = "nvmlDeviceGetComputeRunningProcesses_v3 failed";
+                ok     = false;
+                break;
+            }
             for (const NvmlProcessInfo& info : infos) {
                 GpuProcess process;
                 process.pid = info.pid;
                 if (info.usedGpuMemory != NVML_VALUE_NOT_AVAILABLE)
                     process.used_bytes = info.usedGpuMemory;
-                result.processes.push_back(process);
+                gpu.processes.push_back(process);
             }
-            snapshot = std::move(result);
-        } else {
-            reason = "nvmlDeviceGetComputeRunningProcesses_v3 failed";
+            // A failing graphics list only means this GPU cannot be matched by it.
+            if (graphics_processes != nullptr && list_processes(graphics_processes, device, infos))
+                for (const NvmlProcessInfo& info : infos)
+                    gpu.graphics_pids.push_back(info.pid);
+            gpus.push_back(std::move(gpu));
         }
+        if (!ok)
+            gpus.clear();
     }
     shutdown();
-    if (!snapshot)
+
+    if (gpus.empty())
         return fail(reason);
-    return snapshot;
+    const auto chosen = choose_render_gpu(gpus, self_pid);
+    if (!chosen)
+        return fail("several GPUs and none lists this process as a graphics client: cannot tell which one draws the preview");
+    return gpus[*chosen];
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -796,11 +850,17 @@ int run_restore_watch(const fs::path& state_file)
     const auto initial = read_state_file(state_file);
     if (!initial)
         return 0;
+    std::error_code ec;
+    const fs::path  ready = restorer_ready_file(state_file);
+    // Handshake with ensure_restorer_unit(): the state file is read, the wait for the holder begins.
+    {
+        std::ofstream marker(ready);
+        marker << ::getpid() << '\n';
+    }
     wait_for_process_exit(static_cast<pid_t>(initial->orca_pid), initial->orca_start);
 
     // Orca rewrote the file while it ran: what it holds now is what is still leased.
     const auto current = read_state_file(state_file);
-    std::error_code ec;
     if (current && !current->items.empty()) {
         RestoreState left = *current;
         left.items        = restore_items(*current, Timeouts{});
@@ -808,10 +868,12 @@ int run_restore_watch(const fs::path& state_file)
             // Unconfirmed leases stay on disk: the next Orca start restores them (restore_orphans()); the daemons drop
             // a dead holder's lease on their own within 30 s as well.
             write_state_file(state_file, left);
+            fs::remove(ready, ec);
             return 1;
         }
     }
     fs::remove(state_file, ec);
+    fs::remove(ready, ec);
     return 0;
 }
 
@@ -860,8 +922,15 @@ int run_command(const std::vector<std::string>& args, std::chrono::milliseconds 
     posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0);
     posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0);
     posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0);
+    // The commands are the system's systemd-run and systemctl: Orca's bundled libraries, which the AppImage's AppRun puts on
+    // LD_LIBRARY_PATH, must not be picked up by them (a mismatching libsystemd makes systemd-run die on a symbol lookup).
+    std::vector<char*> envp;
+    for (char** entry = environ; entry != nullptr && *entry != nullptr; ++entry)
+        if (std::strncmp(*entry, "LD_LIBRARY_PATH=", 16) != 0)
+            envp.push_back(*entry);
+    envp.push_back(nullptr);
     pid_t      child = 0;
-    const int  rc    = ::posix_spawnp(&child, argv[0], &actions, nullptr, argv.data(), environ);
+    const int  rc    = ::posix_spawnp(&child, argv[0], &actions, nullptr, argv.data(), envp.data());
     posix_spawn_file_actions_destroy(&actions);
     if (rc != 0)
         return -1;
@@ -909,26 +978,54 @@ bool restorer_available()
 
 bool ensure_restorer_unit(pid_t orca_pid, const fs::path& state_file)
 {
-    const std::string unit = "orca-vram-restore-" + std::to_string(orca_pid);
-    // Already running: a second launch under the same unit name would fail.
+    const std::string unit  = "orca-vram-restore-" + std::to_string(orca_pid);
+    const fs::path    ready = restorer_ready_file(state_file);
+    // Already running (a second launch under the same unit name would fail): it still has to have reported ready; one
+    // that is stuck in its start or could not write the marker does not count.
     if (run_command({"systemctl", "--user", "is-active", "--quiet", unit + ".service"}, std::chrono::seconds(5)) == 0)
-        return true;
+        return wait_for_restorer_ready(ready, std::chrono::seconds(5));
 
     std::error_code ec;
     const fs::path  exe = fs::read_symlink("/proc/self/exe", ec);
     if (ec || exe.empty())
         return false;
 
+    // A stale marker of an earlier watcher would pass for this one.
+    fs::remove(ready, ec);
+
     // Type=exec: systemd-run returns only once the helper has actually been exec'd (a missing or unreadable binary fails
     // here instead of leaving offloaded models without a restorer).
-    std::vector<std::string> args{"systemd-run", "--user", "--collect", "--quiet", "--unit=" + unit, "--property=Type=exec", "--property=MemoryMax=64M"};
+    // MemoryMax: the watcher is the whole Orca binary (statically linked, ~80 MB resident, mostly file-backed pages), so
+    // 256M leaves a wide margin; the limit only stops a runaway helper.
+    std::vector<std::string> args{"systemd-run", "--user", "--collect", "--quiet", "--unit=" + unit, "--property=Type=exec", "--property=MemoryMax=256M"};
     // The user manager's environment is not Orca's: the AppImage's AppRun puts its bundled libraries on LD_LIBRARY_PATH.
     if (const char* libraries = std::getenv("LD_LIBRARY_PATH"); libraries != nullptr && libraries[0] != '\0')
         args.push_back(std::string("--setenv=LD_LIBRARY_PATH=") + libraries);
     args.push_back(exe.string());
     args.push_back("--vram-restore-watch");
     args.push_back(state_file.string());
-    return run_command(args, std::chrono::seconds(10)) == 0;
+    if (run_command(args, std::chrono::seconds(10)) != 0)
+        return false;
+    return wait_for_restorer_ready(ready, std::chrono::seconds(5));
+}
+
+bool wait_for_restorer_ready(const fs::path& ready, std::chrono::milliseconds timeout)
+{
+    // The helper has started, read the state file and is waiting for Orca. One that died on a missing library after
+    // exec, or on a bad file, or that cannot write its marker, never reports ready; no offload is made without it.
+    std::error_code ec;
+    const auto      deadline = Clock::now() + timeout;
+    while (!fs::exists(ready, ec)) {
+        if (Clock::now() >= deadline)
+            return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return true;
+}
+
+fs::path restorer_ready_file(const fs::path& state_file)
+{
+    return state_file.string() + ".ready";
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -956,6 +1053,7 @@ const char* policy_to_string(Policy policy)
 
 PreviewFlow::OnEnter PreviewFlow::enter_preview(bool feature_active)
 {
+    ++m_epoch;
     m_in_preview = true;
     m_left_at.reset();
     // The leases are being restored right now: that brings the models back onto the GPU, so the toolpath upload waits for

@@ -325,6 +325,76 @@ TEST_CASE("NVML probe is off cleanly when the library is missing", "[VramOffload
     CHECK_FALSE(why.empty());
 }
 
+TEST_CASE("The GPU Orca renders on is picked among several", "[VramOffload]")
+{
+    GpuSnapshot a;
+    a.index         = 0;
+    a.free_bytes    = 6ULL << 30;
+    a.graphics_pids = {111};
+    GpuSnapshot b;
+    b.index         = 1;
+    b.free_bytes    = 1ULL << 30;
+    b.graphics_pids = {222, 4242};
+    b.processes     = {{100, 2ULL << 30}};
+
+    CHECK_FALSE(choose_render_gpu({}, 4242).has_value());
+    // Two GPUs: the one listing this process as a graphics client, not index 0.
+    CHECK(choose_render_gpu({a, b}, 4242) == std::optional<std::size_t>(1));
+    CHECK(choose_render_gpu({b, a}, 111) == std::optional<std::size_t>(1));
+    // Several GPUs and none lists it: no guess, nothing is offered.
+    CHECK_FALSE(choose_render_gpu({a, b}, 9999).has_value());
+    CHECK_FALSE(choose_render_gpu({a, b}, 0).has_value());
+    // One GPU: it is the one, even when the render path is not listed (Zink and the like).
+    CHECK(choose_render_gpu({a}, 9999) == std::optional<std::size_t>(0));
+    // A compute entry counts as well, when no graphics list names the process.
+    GpuSnapshot c = a;
+    c.processes   = {{4242, 1ULL << 20}};
+    CHECK(choose_render_gpu({a, c}, 4242) == std::optional<std::size_t>(1));
+
+    // Graphics beats compute: GPU 0 holds a compute context of this pid, GPU 1 the graphics one that draws.
+    GpuSnapshot compute_only = a;
+    compute_only.processes   = {{4242, 1ULL << 20}};
+    CHECK(choose_render_gpu({compute_only, b}, 4242) == std::optional<std::size_t>(1));
+
+    // Two graphics matches, or two compute matches: ambiguous, enumeration order must not decide.
+    GpuSnapshot b2 = b;
+    b2.index       = 2;
+    CHECK_FALSE(choose_render_gpu({a, b, b2}, 4242).has_value());
+    GpuSnapshot c2 = c;
+    c2.index       = 3;
+    CHECK_FALSE(choose_render_gpu({a, c, c2}, 4242).has_value());
+}
+
+TEST_CASE("A restorer counts only once its marker exists", "[VramOffload]")
+{
+    TempDir  dir;
+    const fs::path ready = dir.path / "vram-offload-1.json.ready";
+    // An active helper without a marker (stuck in its start, or unable to write it) is not ready.
+    const auto started = std::chrono::steady_clock::now();
+    CHECK_FALSE(wait_for_restorer_ready(ready, 100ms));
+    CHECK(std::chrono::steady_clock::now() - started >= 100ms);
+    // A marker that shows up while waiting ends the wait.
+    std::thread writer([&] {
+        std::this_thread::sleep_for(80ms);
+        std::ofstream(ready) << "1\n";
+    });
+    CHECK(wait_for_restorer_ready(ready, 2000ms));
+    writer.join();
+    CHECK(wait_for_restorer_ready(ready, 0ms));
+}
+
+TEST_CASE("A stale callback is told apart by the preview entry count", "[VramOffload][PreviewFlow]")
+{
+    PreviewFlow flow;
+    const auto  t0 = PreviewFlow::Clock::time_point{};
+    flow.enter_preview(true);
+    flow.leave_preview(t0);
+    const auto queued_at_leave = flow.epoch();
+    CHECK(queued_at_leave == flow.epoch()); // nothing happened yet: the callback is current
+    flow.enter_preview(true);               // entered again before the callback ran
+    CHECK(queued_at_leave != flow.epoch());
+}
+
 TEST_CASE("Offload writes the lease down before it asks the daemon", "[VramOffload]")
 {
     TempDir  dir;
@@ -500,6 +570,8 @@ TEST_CASE("Restorer: a SIGKILLed holder gets its leases restored", "[VramOffload
     std::this_thread::sleep_for(150ms);
     CHECK(daemon.requests_of("restore").empty()); // the holder lives: nothing is restored while it runs
     CHECK(code == -1);
+    // The readiness handshake ensure_restorer_unit() waits for: the helper has read the file and waits for the holder.
+    CHECK(fs::exists(restorer_ready_file(file)));
 
     ::kill(holder, SIGKILL);
     int status = 0;
@@ -511,6 +583,7 @@ TEST_CASE("Restorer: a SIGKILLed holder gets its leases restored", "[VramOffload
     REQUIRE(restored.size() == 1);
     CHECK(restored[0]["lease"] == "lease-crash");
     CHECK_FALSE(fs::exists(file));
+    CHECK_FALSE(fs::exists(restorer_ready_file(file))); // the marker goes with the helper
 }
 
 TEST_CASE("Restorer: a holder pid with another start time counts as already dead", "[VramOffload]")

@@ -119,15 +119,25 @@ struct GpuProcess
 
 struct GpuSnapshot
 {
+    unsigned int            index{0};
     std::uint64_t           total_bytes{0};
     std::uint64_t           free_bytes{0};
-    std::vector<GpuProcess> processes;
+    std::vector<GpuProcess> processes;       // compute contexts: where the daemons show up
+    std::vector<unsigned int> graphics_pids; // graphics contexts: where a rendering process like Orca shows up
 };
 
+// The GPU Orca draws on: the one whose graphics process list holds `self_pid`, else the one whose compute list does. At
+// either tier exactly one GPU may match; several matches are ambiguous (the order of enumeration must not decide) and
+// give nullopt. Without a match: the only GPU if there is one; with several GPUs nullopt, so that nothing is offered
+// rather than a guess made.
+std::optional<std::size_t> choose_render_gpu(const std::vector<GpuSnapshot>& gpus, unsigned int self_pid);
+
 // dlopen(library, RTLD_NOW | RTLD_NODELETE) + nvmlInit_v2 ... nvmlShutdown. Never dlclose (cuda-checkpoint issue #58).
-// nullopt, with the reason in `why`, when the library or any symbol is missing or NVML reports an error: the feature
-// is then off and Orca behaves as without it.
-std::optional<GpuSnapshot> probe_gpu(const char* library = "libnvidia-ml.so.1", std::string* why = nullptr);
+// Every GPU is queried; the one `self_pid` renders on is returned (choose_render_gpu). nullopt, with the reason in
+// `why`, when the library or any symbol is missing, NVML reports an error or the GPU cannot be chosen: the feature is
+// then off and Orca behaves as without it.
+std::optional<GpuSnapshot> probe_gpu(const char* library = "libnvidia-ml.so.1", std::string* why = nullptr,
+                                     unsigned int self_pid = 0);
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Consumers: a daemon with a control socket that holds VRAM
@@ -263,9 +273,15 @@ int run_restore_watch(const std::filesystem::path& state_file);
 // killed). Returns the number of files processed.
 int restore_orphans(const std::filesystem::path& dir);
 
-// Starts `systemd-run --user --collect --unit=orca-vram-restore-<pid> --property=MemoryMax=64M <exe> --vram-restore-watch
-// <state file>`, or does nothing when the unit already runs. False when systemd-run is missing or fails.
+// Starts `systemd-run --user --collect --unit=orca-vram-restore-<pid> --property=Type=exec --property=MemoryMax=256M
+// <exe> --vram-restore-watch <state file>`, or finds the unit already running, then waits for the helper's
+// readiness marker (restorer_ready_file). False when systemd-run is missing or fails or the helper never reports ready.
 bool ensure_restorer_unit(pid_t orca_pid, const std::filesystem::path& state_file);
+// The marker `run_restore_watch` writes once it has read the state file and waits for the holder.
+std::filesystem::path restorer_ready_file(const std::filesystem::path& state_file);
+// True once the marker exists, false when it does not appear within `timeout`. Also required of a unit that is
+// already running: one stuck in its start, or unable to write the marker, is not a restorer.
+bool wait_for_restorer_ready(const std::filesystem::path& ready, std::chrono::milliseconds timeout);
 // systemd-run on PATH and a user runtime dir: the precondition for offering offload at all.
 bool restorer_available();
 
@@ -324,6 +340,8 @@ public:
     bool restore_due(Clock::time_point now) const;
     std::optional<Clock::time_point> restore_deadline() const;
     bool in_preview() const { return m_in_preview; }
+    // Counts the preview entries. A callback queued while the preview was left is stale once this has moved.
+    unsigned long long epoch() const { return m_epoch; }
     bool leased() const { return m_leased; }
 
 private:
@@ -334,6 +352,7 @@ private:
     bool                                m_in_preview{false};
     bool                                m_leased{false};
     bool                                m_releasing{false};
+    unsigned long long                  m_epoch{0};
     std::optional<Clock::time_point>    m_left_at;
 };
 

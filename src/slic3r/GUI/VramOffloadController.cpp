@@ -1,10 +1,13 @@
 #include "VramOffloadController.hpp"
 
 #ifdef __linux__
+#include <unistd.h>
+
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -52,6 +55,32 @@ std::string failure_text(const VramOffload::Reply& reply)
 
 } // namespace
 
+// The only way a worker thread reaches the UI thread. The controller closes it in its destructor, on the UI thread and
+// under the same lock that post() holds while it queues, so a worker either queues before the close (and the queued call
+// finds the mailbox closed) or sees it closed and never touches the wx application: the application outlives the
+// controller, and the controller cannot finish dying while a worker is inside post().
+struct VramOffloadController::Mailbox
+{
+    std::mutex        mutex;
+    std::atomic_bool  closed{false};
+
+    void post(const std::shared_ptr<Mailbox>& self, std::function<void()> fn)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (closed)
+            return;
+        wxGetApp().CallAfter([self, fn = std::move(fn)] {
+            if (!self->closed)
+                fn();
+        });
+    }
+    void close()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        closed = true;
+    }
+};
+
 struct VramOffloadController::ProbeShared
 {
     std::mutex                 mutex;
@@ -60,14 +89,15 @@ struct VramOffloadController::ProbeShared
     bool                       handled{false}; // the UI thread has taken the result
 };
 
-VramOffloadController::VramOffloadController(Plater& plater) : m_plater(plater), m_grace_timer(this)
+VramOffloadController::VramOffloadController(Plater& plater)
+    : m_plater(plater), m_grace_timer(this), m_mailbox(std::make_shared<Mailbox>())
 {
     Bind(wxEVT_TIMER, &VramOffloadController::on_grace_timer, this);
 }
 
 VramOffloadController::~VramOffloadController()
 {
-    *m_alive = false;
+    m_mailbox->close();
     m_grace_timer.Stop();
     if (m_dialog != nullptr)
         m_dialog->dismiss();
@@ -110,6 +140,12 @@ void VramOffloadController::on_preview_entered()
     case VramOffload::PreviewFlow::OnEnter::KeepLeases:
     case VramOffload::PreviewFlow::OnEnter::Nothing: break;
     }
+    // No decision pending for this entry (nothing to offer, leases kept, feature off): a deferral left by an earlier
+    // entry, whose own cleanup was skipped as stale, must not outlive it, or the toolpaths would never reach the GPU.
+    if (!m_flow.upload_deferred())
+        end_deferral();
+    // Once the preview is shown (set_current_panel is still running): freed toolpaths that entering does not reload.
+    CallAfter([this] { m_plater.rebuild_released_preview(); });
 }
 
 void VramOffloadController::on_preview_left()
@@ -121,10 +157,11 @@ void VramOffloadController::on_preview_left()
         m_dialog = nullptr;
         m_flow.declined();
         // set_current_panel() hides the preview only after this call: ending the deferral now would load the toolpaths
-        // onto the GPU while the preview is still shown. Afterwards the load is left for the next entry.
-        auto alive = m_alive;
-        wxGetApp().CallAfter([this, alive] {
-            if (*alive)
+        // onto the GPU while the preview is still shown. It ends right after, unless the preview was entered again by
+        // then: that entry has its own deferral, which this stale call must not clear.
+        const auto epoch = m_flow.epoch();
+        CallAfter([this, epoch] {
+            if (epoch == m_flow.epoch())
                 end_deferral();
         });
     }
@@ -133,13 +170,14 @@ void VramOffloadController::on_preview_left()
 
 std::shared_ptr<VramOffloadController::ProbeShared> VramOffloadController::start_probe(VramOffload::Policy policy, std::uint64_t min_free_bytes)
 {
-    auto alive  = m_alive;
-    auto shared = std::make_shared<ProbeShared>();
-    std::thread([this, alive, shared, policy, min_free_bytes] {
+    auto mailbox = m_mailbox;
+    auto shared  = std::make_shared<ProbeShared>();
+    const unsigned int self_pid = static_cast<unsigned int>(::getpid());
+    std::thread([this, mailbox, shared, policy, min_free_bytes, self_pid] {
         ProbeResult result;
         result.min_free_bytes = min_free_bytes;
         std::string why;
-        if (const auto gpu = VramOffload::probe_gpu("libnvidia-ml.so.1", &why)) {
+        if (const auto gpu = VramOffload::probe_gpu("libnvidia-ml.so.1", &why, self_pid)) {
             result.gpu_known  = true;
             result.free_bytes = gpu->free_bytes;
             if (gpu->free_bytes < min_free_bytes)
@@ -152,11 +190,7 @@ std::shared_ptr<VramOffloadController::ProbeShared> VramOffloadController::start
             shared->result = std::move(result);
         }
         shared->ready.notify_all();
-        if (!*alive)
-            return; // the Plater is gone, and the wx app may be going too
-        wxGetApp().CallAfter([this, alive, shared, policy] {
-            if (!*alive)
-                return;
+        mailbox->post(mailbox, [this, shared, policy] {
             ProbeResult taken;
             {
                 std::lock_guard<std::mutex> lock(shared->mutex);
@@ -196,12 +230,10 @@ void VramOffloadController::on_probe_done(const ProbeResult& probe, VramOffload:
 
 void VramOffloadController::show_dialog(const ProbeResult& probe)
 {
-    auto alive     = m_alive;
     auto consumers = probe.consumers;
+    // Called only while the controller lives: its destructor dismisses the dialog without an answer.
     m_dialog = new VramOffloadDialog(wxGetApp().mainframe, consumers, probe.free_bytes, probe.min_free_bytes,
-                                     [this, alive, consumers](const VramOffloadDialog::Result& result) {
-                                         if (!*alive)
-                                             return;
+                                     [this, consumers](const VramOffloadDialog::Result& result) {
                                          m_dialog = nullptr;
                                          // Switched off in Preferences while the dialog was open: nothing is unloaded.
                                          if (configured_policy() == VramOffload::Policy::Never) {
@@ -230,16 +262,11 @@ void VramOffloadController::show_dialog(const ProbeResult& probe)
 void VramOffloadController::start_offload(std::vector<VramOffload::Consumer> consumers)
 {
     m_flow.offload_started();
-    auto alive       = m_alive;
+    auto mailbox     = m_mailbox;
     auto coordinator = wxGetApp().vram_offload_coordinator();
-    std::thread([this, alive, coordinator, consumers = std::move(consumers)] {
+    std::thread([this, mailbox, coordinator, consumers = std::move(consumers)] {
         auto results = coordinator->offload(consumers);
-        if (!*alive)
-            return; // the Plater is gone, and the wx app may be going too
-        wxGetApp().CallAfter([this, alive, results = std::move(results)] {
-            if (*alive)
-                on_offload_done(results);
-        });
+        mailbox->post(mailbox, [this, results = std::move(results)] { on_offload_done(results); });
     }).detach();
 }
 
@@ -293,16 +320,15 @@ void VramOffloadController::start_release()
 {
     m_release_running = true;
     m_flow.release_started();
-    auto alive       = m_alive;
+    // The hidden preview still holds its toolpath buffers, which are what the borrowed VRAM went to: the models would
+    // reload into a full GPU. They go first and are rebuilt when the preview is entered again.
+    if (!m_plater.release_preview_gpu_buffers())
+        BOOST_LOG_TRIVIAL(warning) << "VRAM offload: the preview's GPU buffers could not be released before the restore";
+    auto mailbox     = m_mailbox;
     auto coordinator = wxGetApp().vram_offload_coordinator();
-    std::thread([this, alive, coordinator] {
+    std::thread([this, mailbox, coordinator] {
         auto results = coordinator->release_all();
-        if (!*alive)
-            return; // the Plater is gone, and the wx app may be going too
-        wxGetApp().CallAfter([this, alive, results = std::move(results)] {
-            if (*alive)
-                on_release_done(results);
-        });
+        mailbox->post(mailbox, [this, results = std::move(results)] { on_release_done(results); });
     }).detach();
 }
 
@@ -320,13 +346,15 @@ void VramOffloadController::on_release_done(const std::vector<VramOffload::Relea
             notify(false, (boost::format(_u8L("GPU memory returned to %1% in %2$.1f s.")) % result.item.name % result.reply.seconds).str());
     }
     const bool all_released = wxGetApp().vram_offload_coordinator()->held_count() == 0;
+    const bool any_released = std::any_of(results.begin(), results.end(), [](const VramOffload::ReleaseResult& r) { return r.released; });
     m_flow.release_finished(all_released);
 
     if (m_await_release) {
-        // The preview was entered while the leases were on their way back: the models are on the GPU again, so the
-        // VRAM is judged afresh. The toolpath upload keeps waiting meanwhile (the flow is still deciding).
+        // The preview was entered while the leases were on their way back: the models that came back are on the GPU
+        // again, so the VRAM is judged afresh, also after a partial release (the daemons still held stay as they are).
+        // The toolpath upload keeps waiting meanwhile (the flow is still deciding).
         m_await_release = false;
-        if (all_released && m_flow.in_preview() && configured_policy() != VramOffload::Policy::Never) {
+        if ((all_released || any_released) && m_flow.in_preview() && configured_policy() != VramOffload::Policy::Never) {
             start_probe(configured_policy(), configured_min_free_bytes());
             return;
         }

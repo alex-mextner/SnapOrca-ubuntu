@@ -115,6 +115,7 @@ class Preview : public wxPanel
     unsigned char m_skip_toolpath_causes { 0 };
     // A load skipped the toolpath buffers while the VramOffload cause was set.
     bool m_vram_offload_deferred_load { false };
+    bool m_toolpaths_released { false };
 
 public:
     enum class OptionType : unsigned int
@@ -162,6 +163,19 @@ public:
 
     //BBS: add m_loaded_print logic
     bool is_loaded() const { return (m_loaded_print != nullptr); }
+    // The loaded print is forgotten (its toolpath buffers were freed): the next load rebuilds everything.
+    void forget_loaded_print()
+    {
+        m_loaded_print       = nullptr;
+        m_toolpaths_released = true;
+    }
+    // True once after forget_loaded_print(): the toolpaths were freed and have not been rebuilt yet.
+    bool take_toolpaths_released()
+    {
+        const bool released  = m_toolpaths_released;
+        m_toolpaths_released = false;
+        return released;
+    }
     //BBS
     void on_tick_changed(Type type);
 

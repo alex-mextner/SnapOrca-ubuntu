@@ -19223,6 +19223,38 @@ void Plater::set_toolpath_upload_deferred(bool deferred)
         reload_gcode_preview();
 }
 
+bool Plater::release_preview_gpu_buffers()
+{
+    if (p->preview == nullptr)
+        return true;
+    GLCanvas3D* preview_canvas = p->preview->get_canvas3d();
+    if (preview_canvas == nullptr || preview_canvas->is_gl_lost() || !preview_canvas->get_gcode_viewer().has_data())
+        return true; // nothing on the GPU (a lost canvas was emptied by on_gl_context_lost())
+
+    // The toolpath buffers live in the context shared by all canvases: free them through whichever canvas binds it.
+    GLCanvas3D* binders[] = {preview_canvas, p->view3D != nullptr ? p->view3D->get_canvas3d() : nullptr,
+                             p->assemble_view != nullptr ? p->assemble_view->get_canvas3d() : nullptr};
+    for (GLCanvas3D* canvas : binders) {
+        if (canvas != nullptr && canvas->make_current_for_gl_release()) {
+            preview_canvas->reset_gcode_toolpaths();
+            // Forgotten, so that entering the preview again loads the print and with it the toolpath buffers.
+            p->preview->forget_loaded_print();
+            return true;
+        }
+    }
+    return false;
+}
+
+void Plater::rebuild_released_preview()
+{
+    if (p->preview == nullptr || !p->preview->take_toolpaths_released())
+        return;
+    // Entering the preview loads the print again by itself (set_current_panel -> do_reslice), except for an imported
+    // G-code, which is not sliced and so is not reloaded on entry: its freed toolpaths are rebuilt from the kept result.
+    if (only_gcode_mode())
+        reload_gcode_preview();
+}
+
 void Plater::refresh_print()
 {
     p->preview->refresh_print();

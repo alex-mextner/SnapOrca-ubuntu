@@ -12,9 +12,12 @@ preview needs the memory. Orca asks them over a control socket; it never stops o
 2. "Free VRAM" sends `offload` with a lease per daemon. "Not now" loads the toolpaths at once. "Remember my choice" sets
    `vram_offload_policy` to `always` or `never`.
 3. Leaving the Preview tab starts a 60 s grace timer; coming back cancels it and keeps the leases. After 60 s outside
-   the preview, and at Orca exit, Orca sends `restore` for every lease.
+   the preview, and at Orca exit, Orca sends `restore` for every lease. Before that restore the hidden preview's toolpath
+   GPU buffers are freed (they are what the borrowed VRAM went to) and rebuilt when the preview is entered again; the
+   layer range of the slider is reset by that rebuild.
 4. Crash safety: before the first `offload`, Orca writes `$XDG_RUNTIME_DIR/snapmaker-orca/vram-offload-<pid>.json` and
-   starts `systemd-run --user --unit=orca-vram-restore-<pid> --property=MemoryMax=64M <orca> --vram-restore-watch <file>`.
+   starts `systemd-run --user --unit=orca-vram-restore-<pid> --property=Type=exec --property=MemoryMax=256M <orca> --vram-restore-watch <file>`
+   and waits (5 s) for the helper's marker `<file>.ready`; without it no offload is made.
    That helper mode (handled at the top of `main()`) waits for Orca's pid + start time to disappear and restores what is
    left in the file. The daemons also drop a lease whose holder is gone within 30 s.
 
