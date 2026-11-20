@@ -1264,6 +1264,13 @@ wxWindow* PreferencesDialog::create_general_page()
 
     auto item_gcode_gpu_accel = create_item_checkbox(_L("GPU-accelerated G-code preview"), page,
         _L("Rebuild toolpath geometry on the GPU: much faster preview loading and lower memory on capable graphics cards. If the preview moves slower than before (for example on basic integrated graphics), turn this off to use the compatible renderer. Takes effect when the preview is reloaded."), 50, "gcode_preview_gpu_accel");
+#ifdef __linux__
+    auto item_vram_offload_policy = create_item_combobox(_L("Lend GPU memory"), page,
+        _L("When the G-code preview opens while little GPU memory is free, programs that expose a VRAM control socket (voice recognition, the classifier) can move their models off the GPU until you leave the preview. Ask: show a dialog first. Always: lend without asking. Never: switch the feature off."),
+        "vram_offload_policy", {_L("Ask"), _L("Always"), _L("Never")}, {"ask", "always", "never"});
+    auto item_vram_offload_min_free = create_item_input(_L("Offer when free GPU memory is below"), _L("MiB"), page,
+        _L("The G-code preview offers to lend GPU memory only when the free GPU memory is below this value."), "vram_offload_min_free_mb", [](wxString) {});
+#endif
     auto title_presets = create_item_title(_L("Presets"), page, _L("Presets"));
     //auto title_network = create_item_title(_L("Network"), page, _L("Network"));
     auto item_user_sync        = create_item_checkbox(_L("Auto sync user presets (Printer/Filament/Process)"), page, _L("User Sync"), 50, "sync_user_preset");
@@ -1366,6 +1373,10 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_step_mesh_setting, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_auto_arrange, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_gcode_gpu_accel, 0, wxTOP, FromDIP(3));
+#ifdef __linux__
+    sizer_page->Add(item_vram_offload_policy, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_vram_offload_min_free, 0, wxTOP, FromDIP(3));
+#endif
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_calc_mode, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_user_sync, 0, wxTOP, FromDIP(3));

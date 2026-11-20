@@ -113,6 +113,9 @@ class Preview : public wxPanel
     // SkipToolpaths causes in effect: while any is set, load_print_as_fff passes skip_toolpaths=true to skip the
     // load_toolpaths GPU vertex buffers.
     unsigned char m_skip_toolpath_causes { 0 };
+    // A load skipped the toolpath buffers while the VramOffload cause was set.
+    bool m_vram_offload_deferred_load { false };
+    bool m_toolpaths_released { false };
 
 public:
     enum class OptionType : unsigned int
@@ -160,6 +163,19 @@ public:
 
     //BBS: add m_loaded_print logic
     bool is_loaded() const { return (m_loaded_print != nullptr); }
+    // The loaded print is forgotten (its toolpath buffers were freed): the next load rebuilds everything.
+    void forget_loaded_print()
+    {
+        m_loaded_print       = nullptr;
+        m_toolpaths_released = true;
+    }
+    // True once after forget_loaded_print(): the toolpaths were freed and have not been rebuilt yet.
+    bool take_toolpaths_released()
+    {
+        const bool released  = m_toolpaths_released;
+        m_toolpaths_released = false;
+        return released;
+    }
     //BBS
     void on_tick_changed(Type type);
 
@@ -175,6 +191,9 @@ public:
         MemoryWarning = 1 << 0,
         // A canvas lost its GL context (Plater::on_gl_context_lost()); the recovery ends it.
         GLContextLost = 1 << 1,
+        // The preview entered while GPU memory is short and the user has not yet decided whether to lend VRAM from other
+        // programs (GUI/VramOffloadController); the decision ends it.
+        VramOffload = 1 << 2,
     };
     void set_skip_toolpath_preview(SkipToolpaths cause, bool skip)
     {
@@ -184,6 +203,15 @@ public:
             m_skip_toolpath_causes &= ~static_cast<unsigned char>(cause);
     }
     bool skips_toolpath_preview(SkipToolpaths cause) const { return (m_skip_toolpath_causes & static_cast<unsigned char>(cause)) != 0; }
+    // Ends the VramOffload skip. True when a load was left without toolpaths because of it, i.e. the caller has to load
+    // the preview again for the toolpaths to reach the GPU.
+    bool end_vram_offload_deferral()
+    {
+        const bool deferred = m_vram_offload_deferred_load;
+        m_vram_offload_deferred_load = false;
+        set_skip_toolpath_preview(SkipToolpaths::VramOffload, false);
+        return deferred;
+    }
     GCodeProcessorResult* get_gcode_result() { return m_gcode_result; }
 
 private:

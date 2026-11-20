@@ -181,6 +181,7 @@
 #ifdef __APPLE__
 #include "Gizmos/GLGizmosManager.hpp"
 #endif // __APPLE__
+#include "VramOffloadController.hpp"
 
 #include <libslic3r/CutUtils.hpp>
 #include <wx/glcanvas.h>    // Needs to be last because reasons :-/
@@ -10158,6 +10159,10 @@ struct Plater::priv
     AssembleView* assemble_view { nullptr };
     bool first_enter_assemble{ true };
     std::unique_ptr<NotificationManager> notification_manager;
+#ifdef __linux__
+    // Lends VRAM from GPU daemons while the G-code preview runs (VramOffloadController.hpp).
+    std::unique_ptr<VramOffloadController> vram_offload;
+#endif
 
     ProjectDirtyStateManager dirty_state;
 
@@ -14684,6 +14689,21 @@ void Plater::priv::set_current_panel(wxPanel* panel, bool no_slice)
 //#endif
     current_panel = panel;
 
+#ifdef __linux__
+    // Lending VRAM from GPU daemons for the preview: entering makes the offer (the toolpath upload waits for the
+    // decision, which has to be set before do_reslice() loads the preview), leaving starts the restore grace timer.
+    // Not for the first panel set by the priv constructor: Plater::p is not assigned yet.
+    if (wxGetApp().is_editor() && old_panel != nullptr) {
+        if (panel == preview && old_panel != preview) {
+            if (!vram_offload)
+                vram_offload = std::make_unique<VramOffloadController>(*q);
+            vram_offload->on_preview_entered();
+        } else if (old_panel == preview && panel != preview && vram_offload) {
+            vram_offload->on_preview_left();
+        }
+    }
+#endif
+
     // to reduce flickering when changing view, first set as visible the new current panel
     for (wxPanel* p : panels) {
         if (p == current_panel) {
@@ -19188,6 +19208,51 @@ void Plater::reload_gcode_preview()
     // the editor path would skip the parsed gcode and blank it as well.
     p->reset_gcode_toolpaths();
     p->preview->reload_print(false, this->only_gcode_mode());
+}
+
+void Plater::set_toolpath_upload_deferred(bool deferred)
+{
+    if (p->preview == nullptr)
+        return;
+    if (deferred) {
+        p->preview->set_skip_toolpath_preview(Preview::SkipToolpaths::VramOffload, true);
+        return;
+    }
+    // A load that ran meanwhile left the toolpath buffers out; load the preview again now that the VRAM is settled.
+    if (p->preview->end_vram_offload_deferral())
+        reload_gcode_preview();
+}
+
+bool Plater::release_preview_gpu_buffers()
+{
+    if (p->preview == nullptr)
+        return true;
+    GLCanvas3D* preview_canvas = p->preview->get_canvas3d();
+    if (preview_canvas == nullptr || preview_canvas->is_gl_lost() || !preview_canvas->get_gcode_viewer().has_data())
+        return true; // nothing on the GPU (a lost canvas was emptied by on_gl_context_lost())
+
+    // The toolpath buffers live in the context shared by all canvases: free them through whichever canvas binds it.
+    GLCanvas3D* binders[] = {preview_canvas, p->view3D != nullptr ? p->view3D->get_canvas3d() : nullptr,
+                             p->assemble_view != nullptr ? p->assemble_view->get_canvas3d() : nullptr};
+    for (GLCanvas3D* canvas : binders) {
+        if (canvas != nullptr && canvas->make_current_for_gl_release()) {
+            preview_canvas->reset_gcode_toolpaths();
+            // Forgotten, so that entering the preview again loads the print and with it the toolpath buffers.
+            p->preview->forget_loaded_print();
+            return true;
+        }
+    }
+    return false;
+}
+
+void Plater::rebuild_released_preview()
+{
+    if (p->preview == nullptr || !p->preview->take_toolpaths_released())
+        return;
+    // Entering the preview loads the print again by itself (set_current_panel -> do_reslice), except for an imported
+    // G-code, which is not sliced and so is not reloaded on entry: its freed toolpaths are rebuilt from the kept result.
+    if (only_gcode_mode())
+        reload_gcode_preview();
 }
 
 void Plater::refresh_print()

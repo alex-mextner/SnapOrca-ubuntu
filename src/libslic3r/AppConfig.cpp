@@ -216,6 +216,13 @@ void AppConfig::set_defaults()
     if (get("gcode_preview_gpu_accel").empty())
         set_bool("gcode_preview_gpu_accel", true);
 
+    // Lending VRAM from GPU daemons while the G-code preview runs (Linux, see GUI/VramOffloadController): ask|always|never,
+    // and the free-VRAM threshold in MiB below which it is offered.
+    if (get("vram_offload_policy").empty())
+        set("vram_offload_policy", "ask");
+    if (get("vram_offload_min_free_mb").empty())
+        set("vram_offload_min_free_mb", "1536");
+
 //#ifdef SUPPORT_SHOW_HINTS
     if (get("show_hints").empty())
         set_bool("show_hints", true);

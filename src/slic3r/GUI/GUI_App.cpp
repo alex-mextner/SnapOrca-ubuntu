@@ -10,6 +10,7 @@
 #include "format.hpp"
 #include "common_func/common_func.hpp"
 #include "Downloader.hpp"
+#include "slic3r/Utils/VramOffload.hpp"
 
 #include "slic3r/GUI/WebUrlDialog.hpp"
 
@@ -2407,8 +2408,23 @@ bool GUI_App::OnInit()
     }
 }
 
+#ifdef __linux__
+std::shared_ptr<VramOffload::Coordinator> GUI_App::vram_offload_coordinator()
+{
+    if (!m_vram_offload_coordinator)
+        m_vram_offload_coordinator = VramOffload::make_default_coordinator();
+    return m_vram_offload_coordinator;
+}
+#endif
+
 int GUI_App::OnExit()
 {
+#ifdef __linux__
+    // Give the VRAM lent for the preview back first; a daemon that does not answer in time is left to the restorer
+    // unit, which waits for this process to exit.
+    if (m_vram_offload_coordinator)
+        m_vram_offload_coordinator->close();
+#endif
     ::Slic3r::SnapLog::v1::SnapLogClient::instance().shutdown();
 
     stop_gateway_service();

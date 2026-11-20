@@ -80,6 +80,7 @@ class UserManager;
 class DeviceManager;
 class NetworkAgent;
 class TaskManager;
+namespace VramOffload { class Coordinator; }
 
 namespace Gateway {
 class GatewayService;
@@ -310,6 +311,9 @@ private:
 
     OpenGLManager m_opengl_mgr;
     std::unique_ptr<RemovableDriveManager> m_removable_drive_manager;
+#ifdef __linux__
+    std::shared_ptr<VramOffload::Coordinator> m_vram_offload_coordinator;
+#endif
 
     std::unique_ptr<ImGuiWrapper> m_imgui;
     std::unique_ptr<PrintHostJobQueue> m_printhost_job_queue;
@@ -740,6 +744,11 @@ public:
     GUI_InitParams* init_params { nullptr };
 
     AppConfig*      app_config{ nullptr };
+#ifdef __linux__
+    // The lease holder of the temporary VRAM offload for the G-code preview (GUI/VramOffloadController); created on
+    // first use, closed in OnExit.
+    std::shared_ptr<VramOffload::Coordinator> vram_offload_coordinator();
+#endif
     PresetBundle*   preset_bundle{ nullptr };
     PresetUpdater*  preset_updater{ nullptr };
     MainFrame*      mainframe{ nullptr };
