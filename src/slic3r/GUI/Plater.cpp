@@ -181,6 +181,7 @@
 #ifdef __APPLE__
 #include "Gizmos/GLGizmosManager.hpp"
 #endif // __APPLE__
+#include "VramOffloadController.hpp"
 
 #include <libslic3r/CutUtils.hpp>
 #include <wx/glcanvas.h>    // Needs to be last because reasons :-/
@@ -10158,6 +10159,10 @@ struct Plater::priv
     AssembleView* assemble_view { nullptr };
     bool first_enter_assemble{ true };
     std::unique_ptr<NotificationManager> notification_manager;
+#ifdef __linux__
+    // Lends VRAM from GPU daemons while the G-code preview runs (VramOffloadController.hpp).
+    std::unique_ptr<VramOffloadController> vram_offload;
+#endif
 
     ProjectDirtyStateManager dirty_state;
 
@@ -14684,6 +14689,21 @@ void Plater::priv::set_current_panel(wxPanel* panel, bool no_slice)
 //#endif
     current_panel = panel;
 
+#ifdef __linux__
+    // Lending VRAM from GPU daemons for the preview: entering makes the offer (the toolpath upload waits for the
+    // decision, which has to be set before do_reslice() loads the preview), leaving starts the restore grace timer.
+    // Not for the first panel set by the priv constructor: Plater::p is not assigned yet.
+    if (wxGetApp().is_editor() && old_panel != nullptr) {
+        if (panel == preview && old_panel != preview) {
+            if (!vram_offload)
+                vram_offload = std::make_unique<VramOffloadController>(*q);
+            vram_offload->on_preview_entered();
+        } else if (old_panel == preview && panel != preview && vram_offload) {
+            vram_offload->on_preview_left();
+        }
+    }
+#endif
+
     // to reduce flickering when changing view, first set as visible the new current panel
     for (wxPanel* p : panels) {
         if (p == current_panel) {
@@ -19188,6 +19208,19 @@ void Plater::reload_gcode_preview()
     // the editor path would skip the parsed gcode and blank it as well.
     p->reset_gcode_toolpaths();
     p->preview->reload_print(false, this->only_gcode_mode());
+}
+
+void Plater::set_toolpath_upload_deferred(bool deferred)
+{
+    if (p->preview == nullptr)
+        return;
+    if (deferred) {
+        p->preview->set_skip_toolpath_preview(Preview::SkipToolpaths::VramOffload, true);
+        return;
+    }
+    // A load that ran meanwhile left the toolpath buffers out; load the preview again now that the VRAM is settled.
+    if (p->preview->end_vram_offload_deferral())
+        reload_gcode_preview();
 }
 
 void Plater::refresh_print()

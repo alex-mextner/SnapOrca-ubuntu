@@ -356,6 +356,9 @@ public:
     void reload_gcode_from_disk();
     // rebuild the gcode preview with the current pipeline preference
     void reload_gcode_preview();
+    // While deferred, loading the preview leaves the toolpath GPU buffers out (the VRAM offload decision is pending);
+    // ending the deferral loads them if a load was left out.
+    void set_toolpath_upload_deferred(bool deferred);
     void refresh_print();
     // A canvas lost its GL context (the bind raised an X error, see GLCanvas3D::_on_gl_bind_failed): later previews
     // skip the toolpath GPU buffers and the buffers of the loaded one are freed through a canvas that still binds.

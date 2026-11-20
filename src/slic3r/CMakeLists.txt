@@ -563,6 +563,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/Widgets/TextInput.hpp
     GUI/Widgets/WebView.cpp
     GUI/Widgets/WebView.hpp
+    GUI/VramOffloadController.cpp
+    GUI/VramOffloadController.hpp
+    GUI/VramOffloadDialog.cpp
+    GUI/VramOffloadDialog.hpp
     GUI/WipeTowerDialog.cpp
     GUI/wxExtensions.cpp
     GUI/wxExtensions.hpp
@@ -675,6 +679,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/TCPConsole.hpp
     Utils/UndoRedo.cpp
     Utils/UndoRedo.hpp
+    Utils/VramOffload.cpp
+    Utils/VramOffload.hpp
     Utils/WebSocketClient.hpp
     Utils/WxFontUtils.cpp
     Utils/WxFontUtils.hpp

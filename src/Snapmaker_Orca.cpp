@@ -96,6 +96,10 @@ using namespace nlohmann;
     #include "slic3r/GUI/GUI_Init.hpp"
 #endif /* SLIC3R_GUI */
 
+#if defined(__linux__) && defined(SLIC3R_GUI)
+    #include "slic3r/Utils/VramOffload.hpp"
+#endif
+
 using namespace Slic3r;
 
 /*typedef struct _error_message{
@@ -6417,6 +6421,12 @@ __declspec(dllexport) int __stdcall Snapmaker_Orca_get_privacy_policy() { return
 #else /* _MSC_VER */
 int main(int argc, char **argv)
 {
+#if defined(__linux__) && defined(SLIC3R_GUI)
+    // Crash-safe restorer of the temporary VRAM offload (started by systemd-run, see Utils/VramOffload.hpp). It has to
+    // run before anything else: no Sentry, no wx, no GL, no single-instance check.
+    if (argc == 3 && std::string(argv[1]) == "--vram-restore-watch")
+        return VramOffload::run_restore_watch(argv[2]);
+#endif
     initSentry();
     auto soft_start_time = get_time_timestamp();    
     auto res = CLI().run(argc, argv);

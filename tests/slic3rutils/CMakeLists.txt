@@ -1,3 +1,16 @@
+# The VRAM offload logic (src/slic3r/Utils/VramOffload.cpp) needs no wx, GL or libslic3r: it is compiled straight into
+# its own test executable, so it is built and run by the headless CI (-DSLIC3R_GUI=OFF) as well. The target name keeps
+# the "slic3rutils" prefix because the CI runs `ctest -R slic3rutils` for GUI-side changes.
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(vram_offload_tests
+        VramOffload_test.cpp
+        ${PROJECT_SOURCE_DIR}/src/slic3r/Utils/VramOffload.cpp)
+    target_include_directories(vram_offload_tests PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    target_link_libraries(vram_offload_tests PRIVATE Catch2::Catch2WithMain nlohmann_json Threads::Threads ${CMAKE_DL_LIBS})
+    set_property(TARGET vram_offload_tests PROPERTY FOLDER "tests")
+    catch_discover_tests(vram_offload_tests TEST_PREFIX "slic3rutils: vram_offload: " EXTRA_ARGS ${CATCH_EXTRA_ARGS})
+endif ()
+
 # slic3rutils tests require libslic3r_gui (contains Http.cpp).
 # Skip entirely when GUI is disabled.
 if (NOT SLIC3R_GUI)

@@ -17,3 +17,4 @@ lint_checks:
       - glcanvas3d.cpp
       - gui_app.cpp
       - gcodeviewer.cpp
+      - snapmaker_orca.cpp
