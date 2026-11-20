@@ -247,6 +247,9 @@ public:
 
     EType get_current_type() const { return m_current; }
     GLGizmoBase* get_current() const;
+    // The model object the open gizmo's common data cached, nullptr when none. The pointer may dangle after a deletion:
+    // compare it against the model, never dereference it unchecked.
+    const ModelObject* get_cached_model_object() const;
     GLGizmoBase *get_gizmo(GLGizmosManager::EType type) const;
     EType get_gizmo_from_name(const std::string& gizmo_name) const;
 

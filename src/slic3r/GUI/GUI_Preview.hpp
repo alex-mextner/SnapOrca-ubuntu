@@ -110,9 +110,9 @@ class Preview : public wxPanel
     //BBS: add only gcode mode
     bool m_only_gcode { false };
     bool m_reload_paint_after_background_process_apply{false};
-    // Set by Plater::reslice() memory dialog. When true, load_print_as_fff
-    // passes skip_toolpaths=true to skip load_toolpaths GPU vertex buffers.
-    bool m_skip_toolpath_preview { false };
+    // SkipToolpaths causes in effect: while any is set, load_print_as_fff passes skip_toolpaths=true to skip the
+    // load_toolpaths GPU vertex buffers.
+    unsigned char m_skip_toolpath_causes { 0 };
 
 public:
     enum class OptionType : unsigned int
@@ -168,8 +168,22 @@ public:
     void show_layers_sliders(bool show = true);
     void set_reload_paint_after_background_process_apply(bool flag) { m_reload_paint_after_background_process_apply = flag; }
     bool get_reload_paint_after_background_process_apply() { return m_reload_paint_after_background_process_apply; }
-    void set_skip_toolpath_preview(bool v) { m_skip_toolpath_preview = v; }
-    bool get_skip_toolpath_preview() const { return m_skip_toolpath_preview; }
+    // Why the preview leaves the toolpath GPU vertex buffers out. Each cause ends on its own event, so ending one
+    // must not end the other.
+    enum class SkipToolpaths : unsigned char {
+        // The user went on with a slice at the low-memory dialog of Plater::reslice(); a new slice or project ends it.
+        MemoryWarning = 1 << 0,
+        // A canvas lost its GL context (Plater::on_gl_context_lost()); the recovery ends it.
+        GLContextLost = 1 << 1,
+    };
+    void set_skip_toolpath_preview(SkipToolpaths cause, bool skip)
+    {
+        if (skip)
+            m_skip_toolpath_causes |= static_cast<unsigned char>(cause);
+        else
+            m_skip_toolpath_causes &= ~static_cast<unsigned char>(cause);
+    }
+    bool skips_toolpath_preview(SkipToolpaths cause) const { return (m_skip_toolpath_causes & static_cast<unsigned char>(cause)) != 0; }
     GCodeProcessorResult* get_gcode_result() { return m_gcode_result; }
 
 private:

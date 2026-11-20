@@ -1,5 +1,6 @@
 #include "BufferTexture.hpp"
 #include "3DScene.hpp"
+#include "GLBindTrap.hpp"
 
 #include <GL/glew.h>
 
@@ -66,11 +67,11 @@ void BufferTexture::Reset()
     // The buffers may outlive the GL context during shutdown; deleting a
     // never-created id (0) would be harmless but is avoided anyway.
     if (_bufferId != 0) {
-        glsafe(::glDeleteBuffers(1, &_bufferId));
+        delete_gl_buffers(1, &_bufferId);
         _bufferId = 0;
     }
     if (_textureId != 0) {
-        glsafe(::glDeleteTextures(1, &_textureId));
+        delete_gl_textures(1, &_textureId);
         _textureId = 0;
     }
     _texelCount = 0;

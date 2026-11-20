@@ -1,4 +1,5 @@
 #include "GLGizmoSVG.hpp"
+#include "slic3r/GUI/GLBindTrap.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/GUI_ObjectList.hpp"
@@ -1212,7 +1213,8 @@ void GLGizmoSVG::set_volume_by_selection()
 namespace {
 void delete_texture(Texture& texture){
     if (texture.id != 0) {
-        glsafe(::glDeleteTextures(1, &texture.id));
+        // Runs after the frame, possibly while every canvas is lost: kept for the next bind then.
+        delete_gl_textures(1, &texture.id);
         texture.id = 0;
     }
 }

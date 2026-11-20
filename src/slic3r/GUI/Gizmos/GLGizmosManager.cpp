@@ -1323,6 +1323,14 @@ GLGizmoBase* GLGizmosManager::get_current() const
     return ((m_current == Undefined) || m_gizmos.empty()) ? nullptr : m_gizmos[m_current].get();
 }
 
+const ModelObject* GLGizmosManager::get_cached_model_object() const
+{
+    if (!m_common_gizmos_data)
+        return nullptr;
+    const CommonGizmosDataObjects::SelectionInfo* info = m_common_gizmos_data->selection_info();
+    return info != nullptr ? info->model_object() : nullptr;
+}
+
 GLGizmoBase* GLGizmosManager::get_gizmo(GLGizmosManager::EType type) const
 {
     return ((type == Undefined) || m_gizmos.empty()) ? nullptr : m_gizmos[type].get();

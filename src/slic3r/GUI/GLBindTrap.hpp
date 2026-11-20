@@ -13,6 +13,9 @@ struct GLBindResult
 {
     // The context is current on the canvas' drawable.
     bool bound{false};
+    // The canvas has a window to bind to. A canvas that is not realized yet cannot be bound, which says nothing about
+    // the context: such a bind leaves the current context alone and is not a loss.
+    bool drawable{false};
     // X protocol error raised while binding, 0 for none. Always 0 where no error trap exists
     // (not GTK3 on X11), there the bind reports failure only through `bound`.
     int x_error{0};
@@ -29,6 +32,19 @@ struct GLBindResult
 // caller gets them instead; an XSync at the end of the bind collects errors the server sends asynchronously.
 // Every other error goes on to GDK's handler. GUI thread only.
 GLBindResult bind_gl_context(wxGLCanvas& canvas, const wxGLContext& context);
+
+// The shared context is current: the last bind_gl_context() that reached a drawable succeeded. A failed bind leaves
+// no context current, and GL calls made then are dropped by the driver.
+bool gl_context_bound();
+
+// glDeleteBuffers(), glDeleteVertexArrays() and glDeleteTextures() that keep the names for the next successful
+// bind_gl_context() while no context is current: a delete issued then is dropped and the GPU memory stays taken until
+// the context is destroyed. Volumes, shells and toolpaths are released while a canvas is lost (every bind fails until
+// graphics memory is free again), so their GL objects go through these. The kept names are locked because a GLModel
+// can be dropped on a worker thread.
+void delete_gl_buffers(int count, const unsigned int* names);
+void delete_gl_vertex_arrays(int count, const unsigned int* names);
+void delete_gl_textures(int count, const unsigned int* names);
 
 }} // namespace Slic3r::GUI
 
