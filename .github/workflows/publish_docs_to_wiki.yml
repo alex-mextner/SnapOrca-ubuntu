@@ -21,13 +21,16 @@ env:
   OWNER: ${{ github.event.repository.owner.name }} # This is the repository owner
   REPOSITORY_NAME: ${{ github.event.repository.name }} # This is the repository name
 
+permissions:
+  contents: read
+
 jobs:
   publish_docs_to_wiki:
     name: Publish docs to Wiki
     runs-on: ubuntu-latest
     steps:  
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       # 1. Clone the current wiki master branch to a folder named `tmp_wiki`
       - name: Pull content from wiki

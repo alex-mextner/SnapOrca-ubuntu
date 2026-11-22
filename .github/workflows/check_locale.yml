@@ -8,13 +8,16 @@ on:
        - 'localization/**'
        - ".github/workflows/check_locale.yml"
 
+permissions:
+  contents: read
+
 jobs:
   check_translation:
     name: Check translation
     runs-on: ubuntu-latest
     steps:  
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Install gettext 
         run: |

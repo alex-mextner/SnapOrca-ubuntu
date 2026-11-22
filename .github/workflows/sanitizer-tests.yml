@@ -10,6 +10,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   sanitizers:
     name: ASan+UBSan (${{ matrix.os }})
@@ -40,13 +43,13 @@ jobs:
       UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=0
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           lfs: "true"
 
       - name: Restore deps tarball
         id: cache_deps
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           # Cache a SINGLE zstd tarball instead of the multi-million-file
           # destdir tree (archiving the raw OCCT/OpenCV/boost headers never
@@ -56,7 +59,7 @@ jobs:
           path: ${{ github.workspace }}/deps-destdir.tar.zst
           key: ${{ matrix.os }}-deps-tarball-${{ hashFiles('deps/CMakeLists.txt', 'deps/*.cmake', 'deps/*/*.cmake', 'deps/*/*.patch', 'build_linux.sh') }}
 
-      - uses: lukka/get-cmake@latest
+      - uses: lukka/get-cmake@16e8153a8b4918849d92aad131befe67a3705daa
         with:
           cmakeVersion: "~3.28.0"
 
@@ -130,7 +133,7 @@ jobs:
           tar --zstd -c -f deps-destdir.tar.zst -C deps/build destdir
 
       - name: Setup ccache
-        uses: hendrikmuhs/ccache-action@v1
+        uses: hendrikmuhs/ccache-action@5ebbd400eff9e74630f759d94ddd7b6c26299639
         with:
           key: ${{ matrix.os }}-sanitizers
           append-timestamp: false
@@ -155,7 +158,7 @@ jobs:
 
       - name: Detect changed modules
         id: changed
-        uses: tj-actions/changed-files@v46
+        uses: tj-actions/changed-files@ed68ef82c095e0d48ec87eccea555d944a631a4c
         with:
           files_yaml: |
             core:
@@ -233,7 +236,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
         with:
           name: test-results-sanitizer-${{ matrix.os }}
           path: build_san/test-results.xml
@@ -246,7 +249,7 @@ jobs:
 
       - name: Upload HTML report
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
         with:
           name: test-report-${{ matrix.os }}
           path: build_san/test-report.html
