@@ -3,6 +3,14 @@ import json
 import argparse
 from pathlib import Path
 
+# These exact Snapmaker files are rule/color metadata, not named slicer presets.
+SNAPMAKER_FILAMENT_METADATA_PATHS = {
+    "Snapmaker/filament/filament_allow_list.json",
+    "Snapmaker/filament/filament_compatibility.json",
+    "Snapmaker/filament/filament_hot_bed_nozzles.json",
+    "Snapmaker/filament/filaments_colours.json",
+}
+
 OBSOLETE_KEYS = {
     "acceleration", "scale", "rotate", "duplicate", "duplicate_grid",
     "bed_size", "print_center", "g0", "wipe_tower_per_color_wipe",
@@ -43,23 +51,8 @@ def no_duplicates_object_pairs_hook(pairs):
         seen[key] = value
     return seen
 
-# NOTE: currently Orca expects compatible_printers to be a defined in every instantiation profile, inheritation is not supported in Profile page
-def check_filament_compatible_printers(vendor_folder):
-    """
-    Checks JSON files in the vendor folder for missing or empty 'compatible_printers'
-    when 'instantiation' is flagged as true.
-
-    Parameters:
-        vendor_folder (str or Path): The directory to search for JSON profile files.
-
-    Returns:
-        int: The number of profiles with missing or empty 'compatible_printers'.
-    """
+def _load_filament_profiles(vendor_path):
     error = 0
-    vendor_path = Path(vendor_folder)
-    if not vendor_path.exists():
-        return 0
-    
     profiles = {}
 
     # Use rglob to recursively find .json files.
@@ -77,6 +70,11 @@ def check_filament_compatible_printers(vendor_folder):
             error += 1
             continue
 
+        # Keep JSON and duplicate-key validation above for metadata too.
+        relative_path = file_path.relative_to(vendor_path.parent.parent).as_posix()
+        if relative_path in SNAPMAKER_FILAMENT_METADATA_PATHS:
+            continue
+
         profile_name = data['name']
         if profile_name in profiles:
             print_error(f"Duplicated profile {profile_name}: {file_path}")
@@ -88,6 +86,27 @@ def check_filament_compatible_printers(vendor_folder):
             'content': data,
         }
     
+    return profiles, error
+
+
+# NOTE: currently Orca expects compatible_printers to be a defined in every instantiation profile, inheritation is not supported in Profile page
+def check_filament_compatible_printers(vendor_folder):
+    """
+    Checks JSON files in the vendor folder for missing or empty 'compatible_printers'
+    when 'instantiation' is flagged as true.
+
+    Parameters:
+        vendor_folder (str or Path): The directory to search for JSON profile files.
+
+    Returns:
+        int: The number of profiles with missing or empty 'compatible_printers'.
+    """
+    vendor_path = Path(vendor_folder)
+    if not vendor_path.exists():
+        return 0
+
+    profiles, error = _load_filament_profiles(vendor_path)
+
     def get_property(profile, key):
         content = profile['content']
         if key in content:

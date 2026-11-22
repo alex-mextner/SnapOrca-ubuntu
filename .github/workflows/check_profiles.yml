@@ -5,6 +5,8 @@ on:
     - main 
     paths:
     - 'resources/profiles/**'
+    - 'scripts/orca_extra_profile_check.py'
+    - 'scripts/test_orca_extra_profile_check.py'
     - ".github/workflows/check_profiles.yml"
 
   workflow_dispatch:
@@ -22,6 +24,10 @@ jobs:
     steps:  
       - name: Checkout repository
         uses: actions/checkout@v5
+
+      - name: Run profile-check regression tests
+        run: |
+          python3 ./scripts/test_orca_extra_profile_check.py
 
       - name: Run extra JSON check
         run: |
