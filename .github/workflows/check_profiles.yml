@@ -15,13 +15,16 @@ on:
         default: 'warning'
 
 
+permissions:
+  contents: read
+
 jobs:
   check_translation:
     name: Check profiles
     runs-on: ubuntu-24.04
     steps:  
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Run extra JSON check
         run: |

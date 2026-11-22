@@ -13,6 +13,9 @@ on:
         required: false
         type: boolean
   
+permissions:
+  contents: read
+
 jobs:
   check_cache: # determines if there is a cache and outputs variables used in caching process
     name: Check Cache
@@ -23,7 +26,7 @@ jobs:
       valid-cache: ${{ steps.cache_deps.outputs.cache-hit }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           lfs: 'true'
         
@@ -38,13 +41,15 @@ jobs:
           echo cache-path=${{ github.workspace }}/deps/build${{ env.dep-folder-name }} >> ${{ env.output-cmd }}
       - name: load cache
         id: cache_deps
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ steps.set_outputs.outputs.cache-path }}
           key: ${{ steps.set_outputs.outputs.cache-key }}
           lookup-only: true
         
   build_deps: # call next step
+    permissions:
+      contents: write
     name: Build Deps
     needs: [check_cache]
     uses: ./.github/workflows/build_deps.yml

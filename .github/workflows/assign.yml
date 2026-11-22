@@ -7,6 +7,9 @@ on:
     types: [created]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   assign:
     if: github.ref == 'refs/heads/main'
@@ -15,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Assign the user or unassign stale assignments
-        uses: takanome-dev/assign-issue-action@main
+        uses: takanome-dev/assign-issue-action@50cd62a419fb6b4f1dcfc0d3976a7bfcabbb1151
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           maintainers: 'noisyfox,softfever'
